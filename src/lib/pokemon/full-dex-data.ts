@@ -35,6 +35,49 @@ const MOVE_NAME_KO_OVERRIDES: Record<string, string> = {
   "tera-blast": "테라버스트",
 };
 
+const ABILITY_NAME_KO_OVERRIDES: Record<number, string> = {
+  268: "가시지않는향기",
+  269: "넘치는씨",
+  270: "열교환",
+  271: "분노의껍질",
+  272: "정화의소금",
+  273: "노릇노릇바디",
+  274: "바람타기",
+  275: "파수견",
+  276: "바위나르기",
+  277: "풍력발전",
+  278: "마이티체인지",
+  279: "사령탑",
+  280: "전기로바꾸기",
+  281: "고대활성",
+  282: "쿼크차지",
+  283: "황금몸",
+  284: "재앙의그릇",
+  285: "재앙의검",
+  286: "재앙의목간",
+  287: "재앙의구슬",
+  288: "진홍빛고동",
+  289: "하드론엔진",
+  290: "편승",
+  291: "되새김질",
+  292: "예리함",
+  293: "총대장",
+  294: "협연",
+  295: "독치장",
+  296: "테일아머",
+  297: "흙먹기",
+  298: "균사의힘",
+  299: "심안",
+  300: "감미로운꿀",
+  301: "대접",
+  302: "독사슬",
+  303: "초상투영",
+  304: "테라체인지",
+  305: "테라셸",
+  306: "제로포밍",
+  307: "독조종",
+};
+
 let cachedPromise: Promise<FullDexData> | null = null;
 
 function normalize(value: string): string {
@@ -252,19 +295,37 @@ export async function loadFullDexData(): Promise<FullDexData> {
       typeNameByTypeId.set(typeId, mapTypeName(entry.identifier));
     }
 
-    const abilityNameKoById = new Map<number, string>();
+    const abilityNameById = new Map<number, string>();
+    const abilityNameEnById = new Map<number, string>();
     for (const entry of abilityNames) {
       const languageId = Number(entry.local_language_id);
-      if (languageId !== koreanLanguageId) {
-        continue;
-      }
       const abilityId = Number(entry.ability_id);
       if (!Number.isFinite(abilityId)) {
         continue;
       }
-      if (entry.name) {
-        abilityNameKoById.set(abilityId, entry.name);
+
+      if (!entry.name) {
+        continue;
       }
+
+      if (languageId === koreanLanguageId) {
+        abilityNameById.set(abilityId, entry.name);
+        continue;
+      }
+
+      if (languageId === 9 && !abilityNameEnById.has(abilityId)) {
+        abilityNameEnById.set(abilityId, entry.name);
+      }
+    }
+
+    for (const [abilityId, englishName] of abilityNameEnById.entries()) {
+      if (!abilityNameById.has(abilityId)) {
+        abilityNameById.set(abilityId, englishName);
+      }
+    }
+
+    for (const [abilityId, localizedName] of Object.entries(ABILITY_NAME_KO_OVERRIDES)) {
+      abilityNameById.set(Number(abilityId), localizedName);
     }
 
     const pokemonStatsByPokemonId = new Map<number, StatSpread>();
@@ -323,7 +384,7 @@ export async function loadFullDexData(): Promise<FullDexData> {
       if (!Number.isFinite(pokemonId) || !Number.isFinite(abilityId)) {
         continue;
       }
-      const abilityName = abilityNameKoById.get(abilityId);
+      const abilityName = abilityNameById.get(abilityId);
       if (!abilityName) {
         continue;
       }
@@ -389,6 +450,7 @@ export async function loadFullDexData(): Promise<FullDexData> {
       const typeId = Number(entry.type_id);
       const damageClassId = Number(entry.damage_class_id);
       const power = entry.power ? Number(entry.power) : null;
+      const priority = Number(entry.priority ?? "0");
 
       if (!Number.isFinite(moveId) || !Number.isFinite(typeId) || !Number.isFinite(damageClassId)) {
         continue;
@@ -403,6 +465,7 @@ export async function loadFullDexData(): Promise<FullDexData> {
         type: moveType,
         category: moveCategoryByDamageClassId(damageClassId),
         power: Number.isFinite(power ?? NaN) ? power : null,
+        priority: Number.isFinite(priority) ? priority : 0,
       };
 
       moveNamesKo.push(koName);
@@ -411,7 +474,7 @@ export async function loadFullDexData(): Promise<FullDexData> {
       moveByName[normalize(entry.identifier)] = moveEntry;
     }
 
-    const abilityNamesKo: string[] = Array.from(abilityNameKoById.values()).sort((a, b) =>
+    const abilityNamesKo: string[] = Array.from(abilityNameById.values()).sort((a, b) =>
       a.localeCompare(b, "ko"),
     );
 

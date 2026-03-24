@@ -20,6 +20,8 @@ export type PokemonType =
   | "Steel"
   | "Fairy";
 
+export type TeraType = PokemonType | "Stellar";
+
 export type StatSpread = Record<StatKey, number>;
 
 export type StatStageSpread = Record<StatKey, number>;
@@ -73,16 +75,17 @@ export type MoveCategory = "physical" | "special" | "status";
 
 export type MoveEntry = {
   name: string;
-  type: PokemonType;
+  type: TeraType;
   category: MoveCategory;
   power: number | null;
+  priority: number;
 };
 
 export type BattleWeather = "none" | "sun" | "rain" | "sand" | "snow";
 
 export type DamageCalcOptions = {
-  attackerTeraType: PokemonType | "";
-  defenderTeraType: PokemonType | "";
+  attackerTeraType: TeraType | "";
+  defenderTeraType: TeraType | "";
   weather: BattleWeather;
   attackerAbility?: string;
   defenderAbility?: string;

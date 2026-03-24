@@ -28,7 +28,7 @@ export function TeamPlanner({ pokemonOptions, resolveTypes }: TeamPlannerProps) 
       }))
       .filter((slot) => slot.pokemonName.trim().length > 0);
 
-    const rows = TERA_TYPES.map((attackType) => {
+    const rows = TERA_TYPES.filter((attackType) => attackType !== "Stellar").map((attackType) => {
       let weakCount = 0;
       let resistCount = 0;
       let immuneCount = 0;

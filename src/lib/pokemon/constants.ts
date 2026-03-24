@@ -38,6 +38,7 @@ export const TYPE_LABELS_KO: Record<string, string> = {
   Dark: "악",
   Steel: "강철",
   Fairy: "페어리",
+  Stellar: "스텔라",
 };
 
 export const NATURES: NatureEffect[] = [

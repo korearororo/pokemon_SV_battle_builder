@@ -1,4 +1,4 @@
-import type { MoveEntry, PokemonEntry, PokemonType, StatSpread } from "@/lib/pokemon/types";
+import type { MoveEntry, PokemonEntry, StatSpread, TeraType } from "@/lib/pokemon/types";
 
 function makeStats(
   hp: number,
@@ -11,7 +11,7 @@ function makeStats(
   return { hp, atk, def, spa, spd, spe };
 }
 
-export const TERA_TYPES: PokemonType[] = [
+export const TERA_TYPES: TeraType[] = [
   "Normal",
   "Fire",
   "Water",
@@ -30,6 +30,7 @@ export const TERA_TYPES: PokemonType[] = [
   "Dark",
   "Steel",
   "Fairy",
+  "Stellar",
 ];
 
 export const POKEMON_DATA: PokemonEntry[] = [
@@ -120,24 +121,24 @@ export const POKEMON_DATA: PokemonEntry[] = [
 ];
 
 export const MOVE_DATA: MoveEntry[] = [
-  { name: "Moonblast", type: "Fairy", category: "special", power: 95 },
-  { name: "Shadow Ball", type: "Ghost", category: "special", power: 80 },
-  { name: "Ice Spinner", type: "Ice", category: "physical", power: 80 },
-  { name: "Crunch", type: "Dark", category: "physical", power: 80 },
-  { name: "Extreme Speed", type: "Normal", category: "physical", power: 80 },
-  { name: "Earthquake", type: "Ground", category: "physical", power: 100 },
-  { name: "Make It Rain", type: "Steel", category: "special", power: 120 },
-  { name: "Dazzling Gleam", type: "Fairy", category: "special", power: 80 },
-  { name: "Rage Fist", type: "Ghost", category: "physical", power: 50 },
-  { name: "Drain Punch", type: "Fighting", category: "physical", power: 75 },
-  { name: "Hydro Pump", type: "Water", category: "special", power: 110 },
-  { name: "Freeze-Dry", type: "Ice", category: "special", power: 70 },
-  { name: "Kowtow Cleave", type: "Dark", category: "physical", power: 85 },
-  { name: "Sucker Punch", type: "Dark", category: "physical", power: 70 },
-  { name: "Thunderclap", type: "Electric", category: "special", power: 70 },
-  { name: "Draco Meteor", type: "Dragon", category: "special", power: 130 },
-  { name: "Protect", type: "Normal", category: "status", power: null },
-  { name: "Spore", type: "Grass", category: "status", power: null },
+  { name: "Moonblast", type: "Fairy", category: "special", power: 95, priority: 0 },
+  { name: "Shadow Ball", type: "Ghost", category: "special", power: 80, priority: 0 },
+  { name: "Ice Spinner", type: "Ice", category: "physical", power: 80, priority: 0 },
+  { name: "Crunch", type: "Dark", category: "physical", power: 80, priority: 0 },
+  { name: "Extreme Speed", type: "Normal", category: "physical", power: 80, priority: 2 },
+  { name: "Earthquake", type: "Ground", category: "physical", power: 100, priority: 0 },
+  { name: "Make It Rain", type: "Steel", category: "special", power: 120, priority: 0 },
+  { name: "Dazzling Gleam", type: "Fairy", category: "special", power: 80, priority: 0 },
+  { name: "Rage Fist", type: "Ghost", category: "physical", power: 50, priority: 0 },
+  { name: "Drain Punch", type: "Fighting", category: "physical", power: 75, priority: 0 },
+  { name: "Hydro Pump", type: "Water", category: "special", power: 110, priority: 0 },
+  { name: "Freeze-Dry", type: "Ice", category: "special", power: 70, priority: 0 },
+  { name: "Kowtow Cleave", type: "Dark", category: "physical", power: 85, priority: 0 },
+  { name: "Sucker Punch", type: "Dark", category: "physical", power: 70, priority: 1 },
+  { name: "Thunderclap", type: "Electric", category: "special", power: 70, priority: 1 },
+  { name: "Draco Meteor", type: "Dragon", category: "special", power: 130, priority: 0 },
+  { name: "Protect", type: "Normal", category: "status", power: null, priority: 4 },
+  { name: "Spore", type: "Grass", category: "status", power: null, priority: 0 },
 ];
 
 export const ITEM_DATA: string[] = [

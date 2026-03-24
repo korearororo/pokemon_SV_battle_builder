@@ -8,6 +8,7 @@ import type {
   PokemonType,
   StatKey,
   StatSpread,
+  TeraType,
 } from "@/lib/pokemon/types";
 
 type DamageEstimate = {
@@ -182,6 +183,96 @@ function applyStage(statValue: number, stage: number): number {
   return Math.max(1, Math.floor(statValue * stageMultiplier(stage)));
 }
 
+function isTeraBlast(moveName: string): boolean {
+  const normalized = moveName.trim().toLowerCase();
+  return normalized === "tera blast" || normalized === "tera-blast" || normalized === "테라버스트";
+}
+
+function resolveEffectiveMove(
+  attacker: PokemonEntry,
+  input: BuildInput,
+  move: MoveEntry,
+  options: DamageCalcOptions,
+): MoveEntry {
+  if (!isTeraBlast(move.name) || !options.attackerTeraType) {
+    return move;
+  }
+
+  const attackStat = applyStage(
+    getStatValue(attacker.baseStats, input.ivs, input.evs, input.nature, "atk"),
+    input.attackerStages.atk,
+  );
+  const specialAttackStat = applyStage(
+    getStatValue(attacker.baseStats, input.ivs, input.evs, input.nature, "spa"),
+    input.attackerStages.spa,
+  );
+
+  return {
+    ...move,
+    type: options.attackerTeraType,
+    category: attackStat > specialAttackStat ? "physical" : "special",
+    power: options.attackerTeraType === "Stellar" ? 100 : move.power,
+  };
+}
+
+function isStandardPokemonType(type: TeraType): type is PokemonType {
+  return type !== "Stellar";
+}
+
+function getStabMultiplier(
+  attacker: PokemonEntry,
+  moveType: TeraType,
+  attackerTeraType: DamageCalcOptions["attackerTeraType"],
+  adaptabilityActive: boolean,
+): number {
+  const hasOriginalStab = isStandardPokemonType(moveType) && attacker.types.includes(moveType);
+
+  if (attackerTeraType === "Stellar") {
+    if (hasOriginalStab) {
+      return adaptabilityActive ? 2.25 : 2;
+    }
+    return 1.2;
+  }
+
+  const teraMatchesMove =
+    attackerTeraType !== "" &&
+    isStandardPokemonType(attackerTeraType) &&
+    attackerTeraType === moveType;
+
+  if (teraMatchesMove) {
+    return hasOriginalStab ? 2 : 1.5;
+  }
+
+  if (hasOriginalStab) {
+    return adaptabilityActive ? 2 : 1.5;
+  }
+
+  return 1;
+}
+
+function getEffectiveDefenderTypes(
+  defender: PokemonEntry,
+  defenderTeraType: DamageCalcOptions["defenderTeraType"],
+): PokemonType[] {
+  if (defenderTeraType && defenderTeraType !== "Stellar") {
+    return [defenderTeraType];
+  }
+
+  return defender.types.length >= 1 ? [...defender.types] : ["Normal"];
+}
+
+function getMoveEffectiveness(
+  moveType: TeraType,
+  defenderTypes: PokemonType[],
+  defenderTeraType: DamageCalcOptions["defenderTeraType"],
+): number {
+  if (moveType === "Stellar") {
+    return defenderTeraType ? 2 : 1;
+  }
+
+  return getTypeEffectiveness(moveType, defenderTypes);
+}
+
 export function estimateSpeed(
   pokemon: PokemonEntry,
   input: BuildInput,
@@ -209,11 +300,13 @@ export function estimateMoveDecisivePower(
   move: MoveEntry,
   options: DamageCalcOptions,
 ): { decisivePower: number; attackStat: number; movePower: number; summary: string } | null {
-  if (move.category === "status" || move.power === null) {
+  const effectiveMove = resolveEffectiveMove(attacker, input, move, options);
+
+  if (effectiveMove.category === "status" || effectiveMove.power === null) {
     return null;
   }
 
-  const attackStatKey: StatKey = move.category === "special" ? "spa" : "atk";
+  const attackStatKey: StatKey = effectiveMove.category === "special" ? "spa" : "atk";
   const attackStat = getStatValue(
     attacker.baseStats,
     input.ivs,
@@ -223,29 +316,31 @@ export function estimateMoveDecisivePower(
   );
   const stagedAttackStat = applyStage(attackStat, input.attackerStages[attackStatKey]);
 
-  const hasOriginalStab = attacker.types.includes(move.type);
+  const hasOriginalStab =
+    effectiveMove.type !== "Stellar" && attacker.types.includes(effectiveMove.type);
+  void hasOriginalStab;
+  void hasOriginalStab;
+  void hasOriginalStab;
   const adaptabilityActive = hasAbility(options.attackerAbility, ["적응력", "adaptability"]);
-  const teraStab =
-    options.attackerTeraType && options.attackerTeraType === move.type
-      ? hasOriginalStab
-        ? 2
-        : 1.5
-      : 1;
-  const baseStab = hasOriginalStab ? (adaptabilityActive ? 2 : 1.5) : 1;
-  const stab = teraStab > 1 ? Math.max(teraStab, baseStab) : baseStab;
+  const stab = getStabMultiplier(
+    attacker,
+    effectiveMove.type,
+    options.attackerTeraType,
+    adaptabilityActive,
+  );
 
   let weatherMultiplier = 1;
   if (options.weather === "sun") {
-    if (move.type === "Fire") {
+    if (effectiveMove.type === "Fire") {
       weatherMultiplier = 1.5;
-    } else if (move.type === "Water") {
+    } else if (effectiveMove.type === "Water") {
       weatherMultiplier = 0.5;
     }
   }
   if (options.weather === "rain") {
-    if (move.type === "Water") {
+    if (effectiveMove.type === "Water") {
       weatherMultiplier = 1.5;
-    } else if (move.type === "Fire") {
+    } else if (effectiveMove.type === "Fire") {
       weatherMultiplier = 0.5;
     }
   }
@@ -256,15 +351,15 @@ export function estimateMoveDecisivePower(
     itemMultiplier = 1.3;
   }
   if (
-    move.category === "special" &&
+    effectiveMove.category === "special" &&
     (normalizedItem.includes("choice specs") || normalizedItem.includes("구애안경"))
   ) {
     itemMultiplier = 1.5;
   }
 
-  const attackerAbility = getAttackerAbilityMultiplier(options.attackerAbility, move);
+  const attackerAbility = getAttackerAbilityMultiplier(options.attackerAbility, effectiveMove);
   if (
-    move.category === "physical" &&
+    effectiveMove.category === "physical" &&
     (normalizedItem.includes("choice band") || normalizedItem.includes("구애머리띠"))
   ) {
     itemMultiplier = 1.5;
@@ -273,9 +368,9 @@ export function estimateMoveDecisivePower(
   const totalMultiplier = stab * weatherMultiplier * itemMultiplier * attackerAbility.multiplier;
 
   return {
-    decisivePower: Math.round(stagedAttackStat * move.power * totalMultiplier),
+    decisivePower: Math.round(stagedAttackStat * effectiveMove.power * totalMultiplier),
     attackStat: stagedAttackStat,
-    movePower: move.power,
+    movePower: effectiveMove.power,
     summary: `공격 실수치 ${stagedAttackStat} x 기술 위력 ${move.power} x (STAB ${stab.toFixed(2)} * 날씨 ${weatherMultiplier.toFixed(2)} * 아이템 ${itemMultiplier.toFixed(2)} * 공격특성 ${attackerAbility.multiplier.toFixed(2)})`,
   };
 }
@@ -287,12 +382,14 @@ export function estimateDamagePercent(
   move: MoveEntry,
   options: DamageCalcOptions,
 ): DamageEstimate | null {
-  if (move.category === "status" || move.power === null) {
+  const effectiveMove = resolveEffectiveMove(attacker, input, move, options);
+
+  if (effectiveMove.category === "status" || effectiveMove.power === null) {
     return null;
   }
 
-  const attackStatKey: StatKey = move.category === "special" ? "spa" : "atk";
-  const defenseStatKey: StatKey = move.category === "special" ? "spd" : "def";
+  const attackStatKey: StatKey = effectiveMove.category === "special" ? "spa" : "atk";
+  const defenseStatKey: StatKey = effectiveMove.category === "special" ? "spd" : "def";
 
   const attackStat = getStatValue(
     attacker.baseStats,
@@ -331,45 +428,44 @@ export function estimateDamagePercent(
   );
   const stagedDefenseStat = applyStage(defenderDefense, input.defenderStages[defenseStatKey]);
 
-  const defenderTypes: PokemonType[] = options.defenderTeraType
-    ? [options.defenderTeraType]
-    : defender.types.length >= 1
-      ? [...defender.types]
-      : ["Normal"];
+  const defenderTypes = getEffectiveDefenderTypes(defender, options.defenderTeraType);
 
-  const rawTypeEffectiveness = getTypeEffectiveness(move.type, defenderTypes);
+  const rawTypeEffectiveness = getMoveEffectiveness(
+    effectiveMove.type,
+    defenderTypes,
+    options.defenderTeraType,
+  );
 
-  const hasOriginalStab = attacker.types.includes(move.type);
+  const hasOriginalStab =
+    effectiveMove.type !== "Stellar" && attacker.types.includes(effectiveMove.type);
   const adaptabilityActive = hasAbility(options.attackerAbility, ["적응력", "adaptability"]);
-  const teraStab =
-    options.attackerTeraType && options.attackerTeraType === move.type
-      ? hasOriginalStab
-        ? 2
-        : 1.5
-      : 1;
-  const baseStab = hasOriginalStab ? (adaptabilityActive ? 2 : 1.5) : 1;
-  const stab = teraStab > 1 ? Math.max(teraStab, baseStab) : baseStab;
+  const stab = getStabMultiplier(
+    attacker,
+    effectiveMove.type,
+    options.attackerTeraType,
+    adaptabilityActive,
+  );
 
-  const attackerAbility = getAttackerAbilityMultiplier(options.attackerAbility, move);
+  const attackerAbility = getAttackerAbilityMultiplier(options.attackerAbility, effectiveMove);
   const defenderAbility = getDefenderAbilityMultiplier(
     options.defenderAbility,
-    move,
+    effectiveMove,
     rawTypeEffectiveness,
   );
   const typeEffectiveness = defenderAbility.overrideEffectiveness ?? rawTypeEffectiveness;
 
   let weatherMultiplier = 1;
   if (options.weather === "sun") {
-    if (move.type === "Fire") {
+    if (effectiveMove.type === "Fire") {
       weatherMultiplier = 1.5;
-    } else if (move.type === "Water") {
+    } else if (effectiveMove.type === "Water") {
       weatherMultiplier = 0.5;
     }
   }
   if (options.weather === "rain") {
-    if (move.type === "Water") {
+    if (effectiveMove.type === "Water") {
       weatherMultiplier = 1.5;
-    } else if (move.type === "Fire") {
+    } else if (effectiveMove.type === "Fire") {
       weatherMultiplier = 0.5;
     }
   }
@@ -388,13 +484,13 @@ export function estimateDamagePercent(
     itemMultiplier = 1.3;
   }
   if (
-    move.category === "special" &&
+    effectiveMove.category === "special" &&
     (normalizedItem.includes("choice specs") || normalizedItem.includes("구애안경"))
   ) {
     itemMultiplier = 1.5;
   }
   if (
-    move.category === "physical" &&
+    effectiveMove.category === "physical" &&
     (normalizedItem.includes("choice band") || normalizedItem.includes("구애머리띠"))
   ) {
     itemMultiplier = 1.5;
@@ -402,7 +498,7 @@ export function estimateDamagePercent(
   const baseDamage =
     Math.floor(
       Math.floor(
-        (((2 * 50) / 5 + 2) * move.power * Math.max(1, stagedAttackStat)) /
+        (((2 * 50) / 5 + 2) * effectiveMove.power * Math.max(1, stagedAttackStat)) /
           Math.max(1, effectiveDefense),
       ) / 50,
     ) + 2;
@@ -443,8 +539,8 @@ export function estimateDamagePercent(
     effectiveness: typeEffectiveness,
     effectivenessLabel,
     modifierSummary,
-    decisivePower: Math.round(stagedAttackStat * move.power * totalMultiplier),
-    movePower: move.power,
+    decisivePower: Math.round(stagedAttackStat * effectiveMove.power * totalMultiplier),
+    movePower: effectiveMove.power,
     koState,
     abilitySummary: `공격측 특성: ${attackerAbility.label} / 방어측 특성: ${defenderAbility.label}`,
   };
