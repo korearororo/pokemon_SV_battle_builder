@@ -1,0 +1,205 @@
+@import "tailwindcss";
+
+:root {
+  --pk-red: #dc2626;
+  --pk-blue: #1d4ed8;
+  --pk-yellow: #facc15;
+  --pk-ink: #0b1220;
+  --pk-surface: #f8fafc;
+  --pk-card: #ffffff;
+  --pk-line: #dbe4ff;
+}
+
+body {
+  min-height: 100vh;
+  color: var(--pk-ink);
+  font-family: var(--font-geist-sans), "Segoe UI", sans-serif;
+  background:
+    radial-gradient(circle at 10% 10%, rgba(250, 204, 21, 0.2), transparent 30%),
+    radial-gradient(circle at 90% 15%, rgba(29, 78, 216, 0.18), transparent 35%),
+    linear-gradient(160deg, #fff 0%, #eef4ff 45%, #ffeef0 100%);
+}
+
+.pk-shell {
+  position: relative;
+  border: 2px solid rgba(29, 78, 216, 0.2);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 255, 255, 0.86));
+  box-shadow: 0 20px 60px rgba(13, 31, 68, 0.18);
+}
+
+.pk-shell::before,
+.pk-shell::after {
+  content: "";
+  position: absolute;
+  border-radius: 9999px;
+  pointer-events: none;
+}
+
+.pk-shell::before {
+  top: -26px;
+  right: -26px;
+  width: 88px;
+  height: 88px;
+  background: radial-gradient(circle at 38% 35%, #fff 0 20%, #ef4444 21% 58%, #991b1b 59% 100%);
+  border: 3px solid #0f172a;
+}
+
+.pk-shell::after {
+  bottom: -18px;
+  left: -18px;
+  width: 54px;
+  height: 54px;
+  background: radial-gradient(circle, #fff 0 22%, #2563eb 23% 100%);
+  border: 2px solid #0f172a;
+}
+
+.pk-tabs {
+  background: linear-gradient(90deg, rgba(220, 38, 38, 0.1), rgba(29, 78, 216, 0.1));
+  border: 1px solid rgba(29, 78, 216, 0.2);
+}
+
+.pk-tab-active {
+  color: #fff;
+  background: linear-gradient(120deg, var(--pk-red), #ef4444);
+  box-shadow: 0 6px 20px rgba(220, 38, 38, 0.35);
+  clip-path: polygon(8% 0, 100% 0, 92% 100%, 0 100%);
+}
+
+.pk-tab-idle {
+  color: #1f2937;
+  background: rgba(255, 255, 255, 0.92);
+  clip-path: polygon(8% 0, 100% 0, 92% 100%, 0 100%);
+}
+
+.pk-card {
+  position: relative;
+  border: 1px solid var(--pk-line);
+  background: var(--pk-card);
+  border-radius: 1rem;
+  box-shadow: 0 10px 24px rgba(31, 41, 55, 0.08);
+}
+
+.pk-card::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 10px;
+  height: 10px;
+  border-radius: 9999px;
+  background: #93c5fd;
+  box-shadow: -16px 0 0 #fca5a5;
+}
+
+.pk-card-soft {
+  border: 1px solid #e5ecff;
+  background: linear-gradient(180deg, #ffffff, #f7faff);
+}
+
+.pk-label {
+  color: #334155;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.pk-control {
+  border: 1px solid #c9d6ff;
+  background: #fff;
+  border-radius: 0.75rem;
+  padding: 0.55rem 0.8rem;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.pk-control:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.16);
+}
+
+.pk-primary-btn {
+  border-radius: 0.8rem;
+  color: white;
+  font-weight: 700;
+  background: linear-gradient(120deg, var(--pk-red), #ef4444);
+  box-shadow: 0 10px 24px rgba(220, 38, 38, 0.35);
+}
+
+.pk-secondary-btn {
+  border-radius: 0.8rem;
+  color: #0f172a;
+  font-weight: 700;
+  background: linear-gradient(120deg, #fff, #f1f5ff);
+  border: 1px solid #c9d6ff;
+}
+
+.pk-pill {
+  border-radius: 9999px;
+  padding: 0.2rem 0.65rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  background: linear-gradient(120deg, rgba(250, 204, 21, 0.25), rgba(251, 113, 133, 0.22));
+  color: #7c2d12;
+}
+
+.pk-hud {
+  position: relative;
+  border-radius: 1rem;
+  border: 2px solid #c7d8ff;
+  background:
+    linear-gradient(90deg, rgba(220, 38, 38, 0.08), transparent 30%, transparent 70%, rgba(29, 78, 216, 0.1)),
+    #ffffff;
+}
+
+.pk-hud::before {
+  content: "";
+  position: absolute;
+  inset: 10px;
+  border: 1px dashed rgba(59, 130, 246, 0.22);
+  border-radius: 0.75rem;
+  pointer-events: none;
+}
+
+.pk-section-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 900;
+  letter-spacing: 0.01em;
+}
+
+.pk-section-title::before {
+  content: "";
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 9999px;
+  border: 2px solid #0f172a;
+  background: radial-gradient(circle, #fff 0 35%, #ef4444 36% 100%);
+}
+
+.pk-divider {
+  position: relative;
+  height: 2px;
+  margin: 0.8rem 0 1rem;
+  background: linear-gradient(90deg, rgba(220, 38, 38, 0.45), rgba(29, 78, 216, 0.45));
+}
+
+.pk-divider::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  border: 2px solid #0f172a;
+  background: #fff;
+  transform: translate(-50%, -50%);
+}
+
+.pk-grid-bg {
+  background-image:
+    linear-gradient(rgba(37, 99, 235, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(37, 99, 235, 0.08) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
