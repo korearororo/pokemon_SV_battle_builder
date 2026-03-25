@@ -2,6 +2,8 @@
 
 # dependencies
 /node_modules
+/web/node_modules
+/mobile/node_modules
 /.pnp
 .pnp.*
 .yarn/*
@@ -15,6 +17,7 @@
 
 # next.js
 /.next/
+/web/.next/
 /out/
 
 # production
@@ -35,7 +38,18 @@ yarn-error.log*
 
 # vercel
 .vercel
+/web/.vercel
+
+# expo / react-native
+/mobile/.expo
+/mobile/.expo-shared
+/mobile/dist
+/mobile/android
+/mobile/ios
 
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local run logs
+/web/.runlogs/

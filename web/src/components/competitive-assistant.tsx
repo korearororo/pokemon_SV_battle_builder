@@ -1,6 +1,6 @@
-"use client";
+﻿"use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 
 import { NATURES, ROLE_LABELS, STAT_KEYS, STAT_LABELS, TYPE_LABELS_KO } from "@/lib/pokemon/constants";
@@ -21,7 +21,14 @@ import type {
   TeraType,
 } from "@/lib/pokemon/types";
 
-type TabMode = "builder" | "matchup";
+type TabMode = "builder" | "matchup" | "ai";
+
+type AiMessage = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  suggestedBuilds?: AiSuggestedBuild[];
+};
 
 type RegisteredEntity = {
   id: string;
@@ -37,7 +44,27 @@ type RegisteredEntity = {
   moves: string[];
 };
 
+type AiSuggestedBuild = {
+  nickname: string;
+  pokemonName: string;
+  role: PokemonRole;
+  teraType: string;
+  nature: string;
+  ability: string;
+  item: string;
+  evs: StatSpread;
+  ivs: StatSpread;
+  moves: string[];
+  reason: string;
+};
+
+type AiCoachReplyPayload = {
+  reply: string;
+  suggestedBuilds: AiSuggestedBuild[];
+};
+
 const BUILDS_STORAGE_KEY = "sv-battle:registered-builds";
+const NEW_BUILD_OPTION = "__new__";
 const MAX_TOTAL_EVS = 510;
 const BASE_STAT_RADAR_MAX_VALUE = 140;
 const BASE_STAT_RADAR_OVERFLOW_CAP = 1.24;
@@ -181,6 +208,164 @@ function displayMoveName(moveName: string): string {
   return MOVE_NAME_KO_OVERRIDES[normalize(moveName)] ?? moveName;
 }
 
+function buildSnapshotText(builds: RegisteredEntity[]): string {
+  if (builds.length === 0) {
+    return "등록된 개체가 아직 없습니다. 먼저 개체를 1개 이상 등록해 주세요.";
+  }
+
+  return builds
+    .slice(0, 6)
+    .map((entry, index) => {
+      const moveText = entry.moves.length > 0 ? entry.moves.join(", ") : "기술 미등록";
+      const teraText = entry.teraType || "미지정";
+      return `${index + 1}. ${entry.nickname || entry.pokemonName} | 역할 ${ROLE_LABELS[entry.role]} | 테라 ${teraText} | 기술 ${moveText}`;
+    })
+    .join("\n");
+}
+
+function generateLocalAiReply(input: string, builds: RegisteredEntity[]): string {
+  const prompt = input.trim();
+  if (!prompt) {
+    return "질문을 입력해 주세요.";
+  }
+
+  const normalizedPrompt = normalize(prompt);
+  if (normalizedPrompt.includes("개체") || normalizedPrompt.includes("등록")) {
+    return `현재 등록 개체 요약:\n${buildSnapshotText(builds)}`;
+  }
+
+  if (normalizedPrompt.includes("추천") || normalizedPrompt.includes("빌드")) {
+    return [
+      "로컬 코치 기본 추천 순서:",
+      "1) 역할(스위퍼/서포터 등) 먼저 고정",
+      "2) 테라는 주력기 강화 또는 약점 보완 중 선택",
+      "3) EV는 핵심 스탯 252 + 스피드 조정",
+      "4) 매치업 탭에서 양쪽 기술을 지정해 선/후행 결과 확인",
+      "",
+      `현재 등록 개체 참고:\n${buildSnapshotText(builds)}`,
+    ].join("\n");
+  }
+
+  if (normalizedPrompt.includes("속도") || normalizedPrompt.includes("선공")) {
+    return "매치업 탭에서 양쪽 기술을 지정하면 우선도+스피드 기준으로 선행 순서를 계산합니다.";
+  }
+
+  if (normalizedPrompt.includes("테라")) {
+    return "매치업 탭에서 테라 ON/OFF를 바꿔 결과를 비교할 수 있습니다.";
+  }
+
+  return [
+    "현재 AI 코치 탭입니다.",
+    "예시 질문:",
+    "- 내 개체 요약해줘",
+    "- 코라이돈 샘플 추천해줘",
+    "- 선공/후공 계산 방식 알려줘",
+    "- 테라 ON/OFF 비교해줘",
+  ].join("\n");
+}
+
+function sanitizeSpreadValue(value: unknown, min: number, max: number, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  const integer = Math.trunc(value);
+  return Math.max(min, Math.min(max, integer));
+}
+
+function sanitizeAiSuggestedBuilds(payload: unknown): AiSuggestedBuild[] {
+  if (!Array.isArray(payload)) {
+    return [];
+  }
+
+  const allowedRoles = new Set<PokemonRole>([
+    "sweeper",
+    "bulky-sweeper",
+    "wall",
+    "support",
+    "speed-control",
+  ]);
+
+  return payload
+    .slice(0, 6)
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry && typeof entry === "object"))
+    .map((entry) => {
+      const moves = Array.isArray(entry.moves)
+        ? entry.moves.filter((move): move is string => typeof move === "string").slice(0, 4)
+        : [];
+      const role = typeof entry.role === "string" && allowedRoles.has(entry.role as PokemonRole)
+        ? (entry.role as PokemonRole)
+        : "sweeper";
+      const evs = (entry.evs && typeof entry.evs === "object" ? entry.evs : {}) as Record<string, unknown>;
+      const ivs = (entry.ivs && typeof entry.ivs === "object" ? entry.ivs : {}) as Record<string, unknown>;
+
+      return {
+        nickname: typeof entry.nickname === "string" ? entry.nickname.trim() : "",
+        pokemonName: typeof entry.pokemonName === "string" ? entry.pokemonName.trim() : "",
+        role,
+        teraType: typeof entry.teraType === "string" ? entry.teraType.trim() : "",
+        nature: typeof entry.nature === "string" ? entry.nature.trim() : "Jolly",
+        ability: typeof entry.ability === "string" ? entry.ability.trim() : "",
+        item: typeof entry.item === "string" ? entry.item.trim() : "",
+        evs: {
+          hp: sanitizeSpreadValue(evs.hp, 0, 252, 0),
+          atk: sanitizeSpreadValue(evs.atk, 0, 252, 0),
+          def: sanitizeSpreadValue(evs.def, 0, 252, 0),
+          spa: sanitizeSpreadValue(evs.spa, 0, 252, 0),
+          spd: sanitizeSpreadValue(evs.spd, 0, 252, 0),
+          spe: sanitizeSpreadValue(evs.spe, 0, 252, 0),
+        },
+        ivs: {
+          hp: sanitizeSpreadValue(ivs.hp, 0, 31, 31),
+          atk: sanitizeSpreadValue(ivs.atk, 0, 31, 31),
+          def: sanitizeSpreadValue(ivs.def, 0, 31, 31),
+          spa: sanitizeSpreadValue(ivs.spa, 0, 31, 31),
+          spd: sanitizeSpreadValue(ivs.spd, 0, 31, 31),
+          spe: sanitizeSpreadValue(ivs.spe, 0, 31, 31),
+        },
+        moves: moves.map((move) => displayMoveName(move.trim())).filter((move) => move.length > 0),
+        reason: typeof entry.reason === "string" ? entry.reason.trim() : "",
+      };
+    })
+    .filter((entry) => entry.pokemonName.length > 0);
+}
+
+async function fetchAiCoachReply(input: string, builds: RegisteredEntity[]): Promise<AiCoachReplyPayload | null> {
+  try {
+    const response = await fetch("/api/ai-coach", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: input,
+        builds: builds.map((entry) => ({
+          nickname: entry.nickname,
+          pokemonName: entry.pokemonName,
+          role: entry.role,
+          teraType: entry.teraType,
+          ability: entry.ability,
+          item: entry.item,
+          moves: entry.moves,
+        })),
+      }),
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = (await response.json()) as { reply?: unknown; suggestedBuilds?: unknown };
+    if (typeof payload.reply !== "string" || !payload.reply.trim()) {
+      return null;
+    }
+
+    return {
+      reply: payload.reply.trim(),
+      suggestedBuilds: sanitizeAiSuggestedBuilds(payload.suggestedBuilds),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function isDefensiveMove(move: MoveEntry | null): boolean {
   if (!move) {
     return false;
@@ -201,13 +386,13 @@ function isDefensiveMove(move: MoveEntry | null): boolean {
     "wide guard",
     "mat block",
     "방어",
-    "판별",
+    "간파",
     "킹실드",
     "니들가드",
-    "블로킹",
-    "화염의 수호",
-    "실크트랩",
-    "트릭가드",
+    "브로킹",
+    "독침방어",
+    "트랩셸",
+    "선제방어",
     "와이드가드",
   ]);
 
@@ -419,6 +604,15 @@ async function fetchLearnset(pokemonName: string): Promise<string[]> {
 export function CompetitiveAssistant() {
   const [tab, setTab] = useState<TabMode>("builder");
   const [notice, setNotice] = useState<string>("");
+  const [aiInput, setAiInput] = useState<string>("");
+  const [aiStatus, setAiStatus] = useState<"idle" | "connecting" | "generating">("idle");
+  const [aiMessages, setAiMessages] = useState<AiMessage[]>([
+    {
+      id: "ai-welcome",
+      role: "assistant",
+      text: "AI 코치 탭입니다. API 없이 로컬 규칙 기반으로 응답합니다. 예: '내 개체 요약해줘'",
+    },
+  ]);
 
   const [registeredBuilds, setRegisteredBuilds] = useState<RegisteredEntity[]>(() =>
     typeof window === "undefined"
@@ -457,12 +651,20 @@ export function CompetitiveAssistant() {
   const [resolvedRightPokemon, setResolvedRightPokemon] = useState<PokemonEntry | null>(null);
   const [resolvedLeftMove, setResolvedLeftMove] = useState<MoveEntry | null>(null);
   const [resolvedRightMove, setResolvedRightMove] = useState<MoveEntry | null>(null);
+  const aiMessagesContainerRef = useRef<HTMLDivElement | null>(null);
 
   const evTotal = getSpreadTotal(evs);
 
   useEffect(() => {
     window.localStorage.setItem(BUILDS_STORAGE_KEY, JSON.stringify(registeredBuilds));
   }, [registeredBuilds]);
+
+  useEffect(() => {
+    if (!aiMessagesContainerRef.current) {
+      return;
+    }
+    aiMessagesContainerRef.current.scrollTop = aiMessagesContainerRef.current.scrollHeight;
+  }, [aiMessages, aiStatus]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -541,6 +743,7 @@ export function CompetitiveAssistant() {
     () => (leftBuild ? leftBuild.moves.filter((move) => move.trim().length > 0) : []),
     [leftBuild],
   );
+  const [builderSelectedId, setBuilderSelectedId] = useState<string>(NEW_BUILD_OPTION);
   const rightMoveOptions = useMemo<string[]>(
     () => (rightBuild ? rightBuild.moves.filter((move) => move.trim().length > 0) : []),
     [rightBuild],
@@ -642,7 +845,7 @@ export function CompetitiveAssistant() {
 
   const matchupBlockingMessage = useMemo(() => {
     if (!leftBuild || !rightBuild) {
-      return "좌우 개체를 선택하면 양방향 계산이 표시됩니다.";
+      return "좌우 개체를 선택하면 매치업 계산을 표시합니다.";
     }
     if (!leftHasMoves && !rightHasMoves) {
       return "왼쪽/오른쪽 개체 모두 등록된 기술이 없습니다. 개체 등록에서 기술을 1개 이상 추가해 주세요.";
@@ -653,7 +856,7 @@ export function CompetitiveAssistant() {
     if (!rightHasMoves) {
       return "오른쪽 개체에 등록된 기술이 없습니다. 개체 등록에서 기술을 추가해 주세요.";
     }
-    return "좌우 개체와 각 기술을 선택하면 양방향 계산이 표시됩니다.";
+    return "좌우 개체와 각 기술을 선택하면 매치업 계산을 표시합니다.";
   }, [leftBuild, leftHasMoves, rightBuild, rightHasMoves]);
 
   const leftAttackInput = useMemo<BuildInput | null>(() => {
@@ -872,15 +1075,15 @@ export function CompetitiveAssistant() {
 
       if (isDefensiveMove(move)) {
         defenseReady[side] = true;
-        return { summary: `${actorName}의 ${displayMoveName(move.name)}: 방어 태세를 갖췄습니다.`, expectedDamageToTarget: 0, guaranteedKo: false, adjustedPower: null as number | null, gimmickSummary: "없음" };
+        return { summary: `${actorName}의 ${displayMoveName(move.name)}: 방어 자세를 취합니다.`, expectedDamageToTarget: 0, guaranteedKo: false, adjustedPower: null as number | null, gimmickSummary: "없음" };
       }
 
       if (move.category === "status" || move.power === null) {
-        return { summary: `${actorName}의 ${displayMoveName(move.name)}: 변화기라 직접 데미지는 없습니다.`, expectedDamageToTarget: 0, guaranteedKo: false, adjustedPower: null as number | null, gimmickSummary: "없음" };
+        return { summary: `${actorName}의 ${displayMoveName(move.name)}: 변화기라 직접 데미지를 주지 않습니다.`, expectedDamageToTarget: 0, guaranteedKo: false, adjustedPower: null as number | null, gimmickSummary: "없음" };
       }
 
       if (defenseReady[targetSide]) {
-        return { summary: `${actorName}의 ${displayMoveName(move.name)}: ${targetName}의 방어로 막혔습니다.`, expectedDamageToTarget: 0, guaranteedKo: false, adjustedPower: null as number | null, gimmickSummary: "없음" };
+        return { summary: `${actorName}의 ${displayMoveName(move.name)}: ${targetName}의 방어로 막힙니다.`, expectedDamageToTarget: 0, guaranteedKo: false, adjustedPower: null as number | null, gimmickSummary: "없음" };
       }
 
       const estimate = estimateAction(
@@ -946,6 +1149,19 @@ export function CompetitiveAssistant() {
     speedOrderSummary,
   ]);
 
+  const resetBuilderForm = () => {
+    setNickname("");
+    setPokemonName("");
+    setRole("sweeper");
+    setNature("Jolly");
+    setAbility("");
+    setItem("");
+    setTeraType("");
+    setEvs(EMPTY_SPREAD);
+    setIvs(DEFAULT_IVS);
+    setMoves(["", "", "", ""]);
+  };
+
   const addBuild = () => {
     const learnsetSet = new Set(learnsetMoves.map((move) => normalize(displayMoveName(move))));
     const trimmedMoves: [string, string, string, string] = [
@@ -992,12 +1208,229 @@ export function CompetitiveAssistant() {
     };
 
     setRegisteredBuilds((prev) => [...prev, entity]);
+    setBuilderSelectedId(entity.id);
     setNotice(`${entity.nickname || entity.pokemonName} 개체를 등록했습니다.`);
 
     if (!leftId) {
       setLeftId(entity.id);
     } else if (!rightId) {
       setRightId(entity.id);
+    }
+  };
+
+  const addAiSuggestedBuild = (suggestedBuild: AiSuggestedBuild) => {
+    const sanitizedMoves = suggestedBuild.moves
+      .map((move) => displayMoveName(move.trim()))
+      .filter((move, index, source) => move.length > 0 && source.indexOf(move) === index)
+      .slice(0, 4);
+
+    const entity: RegisteredEntity = {
+      id: crypto.randomUUID(),
+      nickname: suggestedBuild.nickname.trim(),
+      pokemonName: suggestedBuild.pokemonName.trim(),
+      role: suggestedBuild.role,
+      teraType: suggestedBuild.teraType.trim(),
+      nature: suggestedBuild.nature.trim() || "Jolly",
+      ability: suggestedBuild.ability.trim(),
+      item: suggestedBuild.item.trim(),
+      evs: suggestedBuild.evs,
+      ivs: suggestedBuild.ivs,
+      moves: sanitizedMoves,
+    };
+
+    setRegisteredBuilds((prev) => [...prev, entity]);
+    setBuilderSelectedId(entity.id);
+    loadBuildToForm(entity);
+    setNotice(`${entity.nickname || entity.pokemonName} 개체를 AI 추천에서 추가했습니다.`);
+
+    if (!leftId) {
+      setLeftId(entity.id);
+    } else if (!rightId) {
+      setRightId(entity.id);
+    }
+  };
+
+  const loadBuildToForm = (entry: RegisteredEntity) => {
+    setNickname(entry.nickname);
+    setPokemonName(entry.pokemonName);
+    setRole(entry.role);
+    setNature(entry.nature || "Jolly");
+    setAbility(entry.ability);
+    setItem(entry.item);
+    setTeraType((entry.teraType as TeraType | "") || "");
+    setEvs(entry.evs);
+    setIvs(entry.ivs);
+    setMoves([
+      entry.moves[0] ?? "",
+      entry.moves[1] ?? "",
+      entry.moves[2] ?? "",
+      entry.moves[3] ?? "",
+    ]);
+    setNotice(`${entry.nickname || entry.pokemonName} 정보를 등록 폼으로 불러왔습니다.`);
+  };
+
+  const removeBuild = (id: string) => {
+    const target = registeredBuilds.find((entry) => entry.id === id);
+    setRegisteredBuilds((prev) => prev.filter((entry) => entry.id !== id));
+
+    if (leftId === id) {
+      setLeftId("");
+    }
+    if (rightId === id) {
+      setRightId("");
+    }
+
+    if (target) {
+      setNotice(`${target.nickname || target.pokemonName} 개체를 삭제했습니다.`);
+    }
+  };
+
+  const saveBuild = () => {
+    const selectedBuild =
+      builderSelectedId === NEW_BUILD_OPTION
+        ? null
+        : (registeredBuilds.find((entry) => entry.id === builderSelectedId) ?? null);
+
+    if (!selectedBuild) {
+      addBuild();
+      return;
+    }
+
+    const learnsetSet = new Set(learnsetMoves.map((move) => normalize(displayMoveName(move))));
+    const trimmedMoves: [string, string, string, string] = [
+      displayMoveName(moves[0].trim()),
+      displayMoveName(moves[1].trim()),
+      displayMoveName(moves[2].trim()),
+      displayMoveName(moves[3].trim()),
+    ];
+
+    if (!pokemonName.trim()) {
+      setNotice("포켓몬 이름을 입력해 주세요.");
+      return;
+    }
+
+    const enteredMoves = trimmedMoves.filter((move) => move.trim().length > 0);
+    if (enteredMoves.length > 0 && learnsetStatus !== "ready") {
+      setNotice("학습 기술 데이터를 아직 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.");
+      return;
+    }
+    if (enteredMoves.some((move) => !learnsetSet.has(normalize(move)))) {
+      setNotice("입력한 기술 중 해당 포켓몬이 배울 수 없는 기술이 있습니다.");
+      return;
+    }
+    if (getSpreadTotal(evs) > MAX_TOTAL_EVS) {
+      setNotice(`노력치 총합은 ${MAX_TOTAL_EVS}를 넘길 수 없습니다.`);
+      return;
+    }
+
+    const candidate: RegisteredEntity = {
+      id: selectedBuild.id,
+      nickname: nickname.trim(),
+      pokemonName: pokemonName.trim(),
+      role,
+      teraType: teraType.trim(),
+      nature,
+      ability: ability.trim(),
+      item: item.trim(),
+      evs,
+      ivs,
+      moves: enteredMoves,
+    };
+
+    const oldName = selectedBuild.nickname.trim() || selectedBuild.pokemonName.trim();
+    const newName = candidate.nickname.trim() || candidate.pokemonName.trim();
+    if (oldName === newName) {
+      setRegisteredBuilds((prev) => prev.map((entry) => (entry.id === selectedBuild.id ? candidate : entry)));
+      setNotice(`${newName} 개체를 수정/저장했습니다.`);
+      return;
+    }
+
+    const newEntity: RegisteredEntity = {
+      ...candidate,
+      id: crypto.randomUUID(),
+    };
+    setRegisteredBuilds((prev) => [...prev, newEntity]);
+    setBuilderSelectedId(newEntity.id);
+    setNotice(`${newName} 개체를 신규 저장했습니다.`);
+  };
+
+  const deleteOrClearBuilder = () => {
+    const selectedBuild =
+      builderSelectedId === NEW_BUILD_OPTION
+        ? null
+        : (registeredBuilds.find((entry) => entry.id === builderSelectedId) ?? null);
+
+    if (selectedBuild) {
+      removeBuild(selectedBuild.id);
+      setBuilderSelectedId(NEW_BUILD_OPTION);
+    }
+
+    resetBuilderForm();
+    if (!selectedBuild) {
+      setNotice("작성 중인 폼을 비웠습니다.");
+    }
+  };
+
+  const applyBuilderSelection = (nextId: string) => {
+    setBuilderSelectedId(nextId);
+    if (nextId === NEW_BUILD_OPTION) {
+      resetBuilderForm();
+      setNotice("신규 개체 등록 모드로 전환했습니다.");
+      return;
+    }
+
+    const selected = registeredBuilds.find((entry) => entry.id === nextId);
+    if (!selected) {
+      setBuilderSelectedId(NEW_BUILD_OPTION);
+      resetBuilderForm();
+      return;
+    }
+    loadBuildToForm(selected);
+  };
+
+  useEffect(() => {
+    if (builderSelectedId === NEW_BUILD_OPTION) {
+      return;
+    }
+    if (!registeredBuilds.some((entry) => entry.id === builderSelectedId)) {
+      setBuilderSelectedId(NEW_BUILD_OPTION);
+    }
+  }, [builderSelectedId, registeredBuilds]);
+
+  const sendAiMessage = async () => {
+    if (aiStatus !== "idle") {
+      return;
+    }
+
+    const trimmed = aiInput.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    const userMessage: AiMessage = {
+      id: `user-${Date.now()}`,
+      role: "user",
+      text: trimmed,
+    };
+    setAiMessages((prev) => [...prev, userMessage]);
+    setAiInput("");
+    setAiStatus("connecting");
+    const stageTimer = setTimeout(() => {
+      setAiStatus((prev) => (prev === "connecting" ? "generating" : prev));
+    }, 1200);
+
+    try {
+      const aiReply = await fetchAiCoachReply(trimmed, registeredBuilds);
+      const assistantMessage: AiMessage = {
+        id: `assistant-${Date.now()}`,
+        role: "assistant",
+        text: aiReply?.reply ?? generateLocalAiReply(trimmed, registeredBuilds),
+        suggestedBuilds: aiReply?.suggestedBuilds ?? [],
+      };
+      setAiMessages((prev) => [...prev, assistantMessage]);
+    } finally {
+      clearTimeout(stageTimer);
+      setAiStatus("idle");
     }
   };
 
@@ -1019,14 +1452,19 @@ export function CompetitiveAssistant() {
           onClick={() => setTab("builder")}
           className={`px-4 py-2 text-sm font-semibold transition ${tab === "builder" ? "pk-tab-active" : "pk-tab-idle"}`}
         >
-          개체 추가
-        </button>
+          개체 추가/관리        </button>
         <button
           type="button"
           onClick={() => setTab("matchup")}
           className={`px-4 py-2 text-sm font-semibold transition ${tab === "matchup" ? "pk-tab-active" : "pk-tab-idle"}`}
         >
-          매치업
+          매치업        </button>
+        <button
+          type="button"
+          onClick={() => setTab("ai")}
+          className={`px-4 py-2 text-sm font-semibold transition ${tab === "ai" ? "pk-tab-active" : "pk-tab-idle"}`}
+        >
+          AI 코치
         </button>
       </div>
 
@@ -1036,16 +1474,32 @@ export function CompetitiveAssistant() {
 
       {tab === "builder" ? (
         <div className="pk-grid-bg space-y-4 rounded-2xl p-2 md:p-3">
-          <h2 className="pk-section-title text-lg text-slate-900">신규 개체 등록</h2>
+          <h2 className="pk-section-title text-lg text-slate-900">개체 추가/관리</h2>
+
+          <label className="grid gap-1 text-sm text-slate-700">
+            개체 선택
+            <select
+              value={builderSelectedId}
+              onChange={(event) => applyBuilderSelection(event.target.value)}
+              className="pk-control"
+            >
+              <option value={NEW_BUILD_OPTION}>새로 추가</option>
+              {registeredBuilds.map((entry) => (
+                <option key={`builder-select-${entry.id}`} value={entry.id}>
+                  {entry.nickname || entry.pokemonName}
+                </option>
+              ))}
+            </select>
+          </label>
 
           <div className="grid gap-4 md:grid-cols-3">
             <label className="grid gap-1 text-sm text-slate-700">
-              별칭(선택)
+              별명(선택)
               <input
                 value={nickname}
                 onChange={(event) => setNickname(event.target.value)}
                 className="pk-control"
-                placeholder="예: 안경 파오젠"
+                placeholder="예: 역전 카이오가"
               />
             </label>
             <label className="grid gap-1 text-sm text-slate-700">
@@ -1055,7 +1509,7 @@ export function CompetitiveAssistant() {
                 value={pokemonName}
                 onChange={(event) => setPokemonName(event.target.value)}
                 className="pk-control"
-                placeholder="예: 파오젠"
+                placeholder="예: 코라이돈"
               />
               <datalist id="builder-pokemon">
                 {pokemonSuggestions.map((name) => (
@@ -1099,7 +1553,7 @@ export function CompetitiveAssistant() {
                       ))}
                     </div>
                     <p>
-                      타입: {builderPokemonEntry.types.map((type) => TYPE_LABELS_KO[type] ?? type).join(" / ")}
+                      타입 {builderPokemonEntry.types.map((type) => TYPE_LABELS_KO[type] ?? type).join(" / ")}
                     </p>
                     <p>특성: {builderPokemonEntry.abilities.join(", ")}</p>
                   </div>
@@ -1162,7 +1616,7 @@ export function CompetitiveAssistant() {
                     </option>
                   ))
                 ) : (
-                  <option value="">포켓몬을 먼저 선택하세요</option>
+                  <option value="">포켓몬을 먼저 선택해 주세요</option>
                 )}
               </select>
             </label>
@@ -1187,7 +1641,7 @@ export function CompetitiveAssistant() {
                 onChange={(event) => setTeraType(event.target.value as TeraType | "")}
                 className="pk-control"
               >
-                <option value="">미설정</option>
+                <option value="">미지정</option>
                 {TERA_TYPES.map((type) => (
                   <option key={type} value={type}>
                     {TYPE_LABELS_KO[type] ?? type}
@@ -1243,7 +1697,7 @@ export function CompetitiveAssistant() {
           <div className="pk-card border-amber-200 bg-amber-50/70 p-3">
             <h3 className="mb-2 text-sm font-semibold text-slate-900">배운 기술 4개</h3>
             <p className="mb-2 text-xs text-slate-600">
-              등록 가능한 기술은 해당 포켓몬이 실제로 배울 수 있는 기술만 허용됩니다.
+              등록 가능한 기술은 해당 포켓몬이 실제로 배울 수 있는 기술만 허용합니다.
             </p>
             {learnsetStatus === "loading" ? (
               <p className="mb-2 text-xs text-slate-600">학습 기술 목록을 불러오는 중...</p>
@@ -1280,15 +1734,22 @@ export function CompetitiveAssistant() {
             </datalist>
           </div>
 
-          <button
-            type="button"
-            onClick={addBuild}
-                className="pk-primary-btn px-4 py-2 text-sm"
-          >
-            개체 등록
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={saveBuild}
+              className="pk-primary-btn px-4 py-2 text-sm"
+            >
+              수정/저장            </button>
+            <button
+              type="button"
+              onClick={deleteOrClearBuilder}
+              className="rounded-md bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500"
+            >
+              삭제/비우기            </button>
+          </div>
         </div>
-      ) : (
+      ) : tab === "matchup" ? (
         <div className="pk-grid-bg space-y-4 rounded-2xl p-2 md:p-3">
           <h2 className="pk-section-title text-lg text-slate-900">등록 개체 매치업 비교</h2>
 
@@ -1426,7 +1887,7 @@ export function CompetitiveAssistant() {
               <span>
                 왼쪽 테라스탈
                 {" "}
-                ({leftRegisteredTeraType ? TYPE_LABELS_KO[leftRegisteredTeraType] ?? leftRegisteredTeraType : "미설정"})
+                ({leftRegisteredTeraType ? TYPE_LABELS_KO[leftRegisteredTeraType] ?? leftRegisteredTeraType : "미지정"})
               </span>
               <button
                 type="button"
@@ -1441,7 +1902,7 @@ export function CompetitiveAssistant() {
               <span>
                 오른쪽 테라스탈
                 {" "}
-                ({rightRegisteredTeraType ? TYPE_LABELS_KO[rightRegisteredTeraType] ?? rightRegisteredTeraType : "미설정"})
+                ({rightRegisteredTeraType ? TYPE_LABELS_KO[rightRegisteredTeraType] ?? rightRegisteredTeraType : "미지정"})
               </span>
               <button
                 type="button"
@@ -1456,7 +1917,7 @@ export function CompetitiveAssistant() {
 
           <div className="grid gap-4 md:grid-cols-2">
             <div className="pk-card p-3">
-              <h3 className="mb-2 text-sm font-semibold text-slate-900">왼쪽 랭크 보정</h3>
+              <h3 className="mb-2 text-sm font-semibold text-slate-900">왼쪽 스탯 보정</h3>
               {STAT_KEYS.filter((stat) => stat !== "hp").map((stat) => (
                 <label key={`left-${stat}`} className="mb-1 grid grid-cols-2 items-center gap-2 text-sm">
                   <span>{STAT_LABELS[stat]}</span>
@@ -1474,7 +1935,7 @@ export function CompetitiveAssistant() {
               ))}
             </div>
             <div className="pk-card p-3">
-              <h3 className="mb-2 text-sm font-semibold text-slate-900">오른쪽 랭크 보정</h3>
+              <h3 className="mb-2 text-sm font-semibold text-slate-900">오른쪽 스탯 보정</h3>
               {STAT_KEYS.filter((stat) => stat !== "hp").map((stat) => (
                 <label key={`right-${stat}`} className="mb-1 grid grid-cols-2 items-center gap-2 text-sm">
                   <span>{STAT_LABELS[stat]}</span>
@@ -1544,8 +2005,86 @@ export function CompetitiveAssistant() {
             ) : null}
           </div>
         </div>
+      ) : (
+        <div className="pk-grid-bg space-y-4 rounded-2xl p-2 md:p-3">
+          <h2 className="pk-section-title text-lg text-slate-900">AI 코치 (로컬 모드)</h2>
+          <p className="text-xs text-slate-600">
+            현재는 API 없이 동작하는 로컬 코치입니다. 등록된 개체 정보를 바탕으로 요약/추천 가이드를 제공합니다.
+          </p>
+
+          <div ref={aiMessagesContainerRef} className="pk-card max-h-[420px] space-y-3 overflow-y-auto p-3">
+            {aiMessages.map((message) => (
+              <div
+                key={message.id}
+                className={`rounded-lg px-3 py-2 text-sm whitespace-pre-wrap ${message.role === "assistant" ? "bg-slate-100 text-slate-800" : "bg-blue-600 text-white"}`}
+              >
+                <p className="mb-1 text-[11px] font-semibold opacity-80">{message.role === "assistant" ? "AI 코치" : "나"}</p>
+                <p>{message.text}</p>
+                {message.role === "assistant" && message.suggestedBuilds && message.suggestedBuilds.length > 0 ? (
+                  <div className="mt-3 space-y-2 rounded-md border border-slate-300 bg-white/80 p-2 text-slate-800">
+                    <p className="text-[11px] font-semibold text-slate-700">AI 추천 개체 추가</p>
+                    {message.suggestedBuilds.map((build, index) => (
+                      <div
+                        key={`${message.id}-build-${build.pokemonName}-${index}`}
+                        className="rounded-md border border-slate-200 bg-slate-50 p-2"
+                      >
+                        <p className="text-xs font-semibold text-slate-800">
+                          {build.nickname ? `${build.nickname} (${build.pokemonName})` : build.pokemonName}
+                        </p>
+                        <p className="text-[11px] text-slate-600">
+                          역할 {ROLE_LABELS[build.role]} | 테라 {build.teraType || "미지정"} | 기술{" "}
+                          {build.moves.length > 0 ? build.moves.join(" / ") : "없음"}
+                        </p>
+                        <button
+                          type="button"
+                          className="mt-2 rounded-md bg-emerald-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-emerald-500"
+                          onClick={() => addAiSuggestedBuild(build)}
+                        >
+                          개체로 추가
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ))}
+            {aiStatus !== "idle" ? (
+              <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                <p className="mb-1 text-[11px] font-semibold opacity-80">AI 코치</p>
+                <p className="animate-pulse">
+                  {aiStatus === "connecting" ? "AI 연결 중..." : "AI 답변 작성 중..."}
+                </p>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="flex gap-2">
+            <input
+              value={aiInput}
+              onChange={(event) => setAiInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  sendAiMessage();
+                }
+              }}
+              className="pk-control flex-1"
+              placeholder="예: 내 개체 요약해줘 / 역할별 추천해줘"
+              disabled={aiStatus !== "idle"}
+            />
+            <button
+              type="button"
+              onClick={sendAiMessage}
+              className="pk-primary-btn px-4 py-2 text-sm"
+              disabled={aiStatus !== "idle"}
+            >
+              {aiStatus === "idle" ? "전송" : "대기"}
+            </button>
+          </div>
+        </div>
       )}
     </section>
   );
 }
+
 
