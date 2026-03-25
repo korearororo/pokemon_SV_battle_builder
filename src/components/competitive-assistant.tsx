@@ -7,7 +7,6 @@ import { NATURES, ROLE_LABELS, STAT_KEYS, STAT_LABELS, TYPE_LABELS_KO } from "@/
 import { TERA_TYPES } from "@/lib/pokemon/data";
 import {
   estimateDamagePercent,
-  estimateMoveDecisivePower,
   estimateSpeed,
 } from "@/lib/pokemon/calculators";
 import type {
@@ -35,7 +34,7 @@ type RegisteredEntity = {
   item: string;
   evs: StatSpread;
   ivs: StatSpread;
-  moves: [string, string, string, string];
+  moves: string[];
 };
 
 const BUILDS_STORAGE_KEY = "sv-battle:registered-builds";
@@ -55,12 +54,27 @@ const ROLE_OPTIONS: PokemonRole[] = [
   "speed-control",
 ];
 
-const WEATHER_OPTIONS: Array<{ value: BattleWeather; label: string }> = [
-  { value: "none", label: "없음" },
-  { value: "sun", label: "쾌청" },
-  { value: "rain", label: "비" },
-  { value: "sand", label: "모래바람" },
-  { value: "snow", label: "눈" },
+type BattleEffect =
+  | "none"
+  | "sun"
+  | "rain"
+  | "sand"
+  | "snow"
+  | "electric-terrain"
+  | "grassy-terrain"
+  | "misty-terrain"
+  | "psychic-terrain";
+
+const BATTLE_EFFECT_OPTIONS: Array<{ value: BattleEffect; label: string; weather: BattleWeather }> = [
+  { value: "none", label: "없음", weather: "none" },
+  { value: "sun", label: "쾌청", weather: "sun" },
+  { value: "rain", label: "비", weather: "rain" },
+  { value: "sand", label: "모래바람", weather: "sand" },
+  { value: "snow", label: "눈", weather: "snow" },
+  { value: "electric-terrain", label: "일렉트릭필드", weather: "none" },
+  { value: "grassy-terrain", label: "그래스필드", weather: "none" },
+  { value: "misty-terrain", label: "미스트필드", weather: "none" },
+  { value: "psychic-terrain", label: "사이코필드", weather: "none" },
 ];
 
 const MOVE_SLOT_IDS = ["m1", "m2", "m3", "m4"] as const;
@@ -147,15 +161,16 @@ function parseRegisteredBuilds(raw: string | null): RegisteredEntity[] {
       (entry) =>
         typeof entry.id === "string" &&
         Array.isArray(entry.moves) &&
-        entry.moves.length === 4 &&
         typeof entry.pokemonName === "string",
       )
       .map((entry) => ({
         ...entry,
-        moves: entry.moves.map((move) => {
+        moves: entry.moves
+          .filter((move) => typeof move === "string")
+          .map((move) => {
           const mapped = MOVE_NAME_KO_OVERRIDES[normalize(move)] ?? move;
           return mapped;
-        }) as [string, string, string, string],
+        }),
       }));
   } catch {
     return [];
@@ -164,6 +179,49 @@ function parseRegisteredBuilds(raw: string | null): RegisteredEntity[] {
 
 function displayMoveName(moveName: string): string {
   return MOVE_NAME_KO_OVERRIDES[normalize(moveName)] ?? moveName;
+}
+
+function isDefensiveMove(move: MoveEntry | null): boolean {
+  if (!move) {
+    return false;
+  }
+
+  const normalized = normalize(move.name);
+  const defensiveMoves = new Set([
+    "protect",
+    "detect",
+    "king's shield",
+    "kings shield",
+    "spiky shield",
+    "baneful bunker",
+    "obstruct",
+    "burning bulwark",
+    "silk trap",
+    "quick guard",
+    "wide guard",
+    "mat block",
+    "방어",
+    "판별",
+    "킹실드",
+    "니들가드",
+    "블로킹",
+    "화염의 수호",
+    "실크트랩",
+    "트릭가드",
+    "와이드가드",
+  ]);
+
+  return defensiveMoves.has(normalized);
+}
+
+function gimmickTags(summary: string): string[] {
+  if (!summary || summary === "없음") {
+    return [];
+  }
+  return summary
+    .split(" / ")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }
 
 function TypeBadge({ type }: { type: TeraType }) {
@@ -207,7 +265,7 @@ function formatNatureOptionLabel(natureName: string): string {
   }
 
   if (!nature.increase && !nature.decrease) {
-    return `${nature.labelKo} (臾대낫??`;
+    return `${nature.labelKo} (무보정)`;
   }
 
   return `${nature.labelKo} (+${natureStatLabel(nature.increase)} / -${natureStatLabel(nature.decrease)})`;
@@ -272,8 +330,8 @@ function StatRadarChart({ title, spread, maxValue, stroke, fill, overflowCap = 1
   return (
     <div className="pk-card flex flex-col items-center p-2">
       <p className="mb-1 text-xs font-bold text-slate-700">{title}</p>
-      <svg viewBox={`0 0 ${size} ${size}`} className="h-44 w-44" role="img" aria-label={`${title} 6媛곹삎 ?뚮씪誘명꽣`}>
-        <title>{`${title} 6媛곹삎 ?뚮씪誘명꽣`}</title>
+      <svg viewBox={`0 0 ${size} ${size}`} className="h-44 w-44" role="img" aria-label={`${title} 6각형 파라미터`}>
+        <title>{`${title} 6각형 파라미터`}</title>
         {rings.map((ring) => (
           <polygon
             key={`${title}-ring-${ring}`}
@@ -387,17 +445,18 @@ export function CompetitiveAssistant() {
 
   const [leftId, setLeftId] = useState<string>("");
   const [rightId, setRightId] = useState<string>("");
-  const [attackerSide, setAttackerSide] = useState<"left" | "right">("left");
-  const [selectedMove, setSelectedMove] = useState<string>("");
-  const [weather, setWeather] = useState<BattleWeather>("none");
-  const [attackerTeraType, setAttackerTeraType] = useState<TeraType | "">("");
-  const [defenderTeraType, setDefenderTeraType] = useState<TeraType | "">("");
+  const [leftSelectedMove, setLeftSelectedMove] = useState<string>("");
+  const [rightSelectedMove, setRightSelectedMove] = useState<string>("");
+  const [battleEffect, setBattleEffect] = useState<BattleEffect>("none");
+  const [leftTeraEnabled, setLeftTeraEnabled] = useState<boolean>(true);
+  const [rightTeraEnabled, setRightTeraEnabled] = useState<boolean>(true);
   const [leftStages, setLeftStages] = useState<StatSpread>(DEFAULT_STAGES);
   const [rightStages, setRightStages] = useState<StatSpread>(DEFAULT_STAGES);
 
-  const [resolvedAttacker, setResolvedAttacker] = useState<PokemonEntry | null>(null);
-  const [resolvedDefender, setResolvedDefender] = useState<PokemonEntry | null>(null);
-  const [resolvedMove, setResolvedMove] = useState<MoveEntry | null>(null);
+  const [resolvedLeftPokemon, setResolvedLeftPokemon] = useState<PokemonEntry | null>(null);
+  const [resolvedRightPokemon, setResolvedRightPokemon] = useState<PokemonEntry | null>(null);
+  const [resolvedLeftMove, setResolvedLeftMove] = useState<MoveEntry | null>(null);
+  const [resolvedRightMove, setResolvedRightMove] = useState<MoveEntry | null>(null);
 
   const evTotal = getSpreadTotal(evs);
 
@@ -478,206 +537,414 @@ export function CompetitiveAssistant() {
     [rightId, registeredBuilds],
   );
 
-  const attackerBuild = attackerSide === "left" ? leftBuild : rightBuild;
-  const defenderBuild = attackerSide === "left" ? rightBuild : leftBuild;
-
-  const attackerStages = attackerSide === "left" ? leftStages : rightStages;
-  const defenderStages = attackerSide === "left" ? rightStages : leftStages;
-
-  const attackerMoveOptions = useMemo<string[]>(
-    () => (attackerBuild ? [...attackerBuild.moves] : []),
-    [attackerBuild],
+  const leftMoveOptions = useMemo<string[]>(
+    () => (leftBuild ? leftBuild.moves.filter((move) => move.trim().length > 0) : []),
+    [leftBuild],
+  );
+  const rightMoveOptions = useMemo<string[]>(
+    () => (rightBuild ? rightBuild.moves.filter((move) => move.trim().length > 0) : []),
+    [rightBuild],
   );
 
-  const activeMove = useMemo(
+  const activeLeftMove = useMemo(
     () =>
-      attackerMoveOptions.some((moveName) => moveName === selectedMove)
-        ? selectedMove
-        : (attackerMoveOptions[0] ?? ""),
-    [attackerMoveOptions, selectedMove],
+      leftMoveOptions.some((moveName) => moveName === leftSelectedMove)
+        ? leftSelectedMove
+        : (leftMoveOptions[0] ?? ""),
+    [leftMoveOptions, leftSelectedMove],
   );
+  const activeRightMove = useMemo(
+    () =>
+      rightMoveOptions.some((moveName) => moveName === rightSelectedMove)
+        ? rightSelectedMove
+        : (rightMoveOptions[0] ?? ""),
+    [rightMoveOptions, rightSelectedMove],
+  );
+  const leftHasMoves = leftMoveOptions.length > 0;
+  const rightHasMoves = rightMoveOptions.length > 0;
+  const leftRegisteredTeraType = useMemo<TeraType | "">(
+    () => (leftBuild && TERA_TYPES.includes(leftBuild.teraType as TeraType) ? (leftBuild.teraType as TeraType) : ""),
+    [leftBuild],
+  );
+  const rightRegisteredTeraType = useMemo<TeraType | "">(
+    () => (rightBuild && TERA_TYPES.includes(rightBuild.teraType as TeraType) ? (rightBuild.teraType as TeraType) : ""),
+    [rightBuild],
+  );
+  const appliedLeftTeraType: TeraType | "" = leftTeraEnabled ? leftRegisteredTeraType : "";
+  const appliedRightTeraType: TeraType | "" = rightTeraEnabled ? rightRegisteredTeraType : "";
+
+  const selectedEffectOption =
+    BATTLE_EFFECT_OPTIONS.find((entry) => entry.value === battleEffect) ?? BATTLE_EFFECT_OPTIONS[0];
+  const appliedWeather = selectedEffectOption.weather;
 
   useEffect(() => {
-    if (!attackerBuild || !defenderBuild || !activeMove) {
+    if (!leftBuild || !rightBuild || !activeLeftMove || !activeRightMove) {
+      setResolvedLeftPokemon(null);
+      setResolvedRightPokemon(null);
+      setResolvedLeftMove(null);
+      setResolvedRightMove(null);
       return;
     }
 
-    const params = new URLSearchParams({
-      attacker: attackerBuild.pokemonName,
-      defender: defenderBuild.pokemonName,
-      move: activeMove,
+    const leftParams = new URLSearchParams({
+      attacker: leftBuild.pokemonName,
+      defender: rightBuild.pokemonName,
+      move: activeLeftMove,
+    });
+    const rightParams = new URLSearchParams({
+      attacker: rightBuild.pokemonName,
+      defender: leftBuild.pokemonName,
+      move: activeRightMove,
     });
 
-    fetch(`/api/battle?${params.toString()}`)
-      .then(async (response) => {
-        if (!response.ok) {
-          return null;
-        }
-        return (await response.json()) as {
-          attacker: PokemonEntry | null;
-          defender: PokemonEntry | null;
-          move: MoveEntry | null;
-        };
+    Promise.all([
+      fetch(`/api/battle?${leftParams.toString()}`),
+      fetch(`/api/battle?${rightParams.toString()}`),
+    ])
+      .then(async ([leftResponse, rightResponse]) => {
+        const leftPayload = leftResponse.ok
+          ? ((await leftResponse.json()) as {
+              attacker: PokemonEntry | null;
+              defender: PokemonEntry | null;
+              move: MoveEntry | null;
+            })
+          : null;
+        const rightPayload = rightResponse.ok
+          ? ((await rightResponse.json()) as {
+              attacker: PokemonEntry | null;
+              defender: PokemonEntry | null;
+              move: MoveEntry | null;
+            })
+          : null;
+        return { leftPayload, rightPayload };
       })
-      .then((payload) => {
-        if (!payload) {
-          setResolvedAttacker(null);
-          setResolvedDefender(null);
-          setResolvedMove(null);
+      .then(({ leftPayload, rightPayload }) => {
+        if (!leftPayload || !rightPayload) {
+          setResolvedLeftPokemon(null);
+          setResolvedRightPokemon(null);
+          setResolvedLeftMove(null);
+          setResolvedRightMove(null);
           return;
         }
 
-        setResolvedAttacker(payload.attacker);
-        setResolvedDefender(payload.defender);
-        setResolvedMove(payload.move);
+        setResolvedLeftPokemon(leftPayload.attacker);
+        setResolvedRightPokemon(leftPayload.defender ?? rightPayload.attacker);
+        setResolvedLeftMove(leftPayload.move);
+        setResolvedRightMove(rightPayload.move);
       })
       .catch(() => {
-        setResolvedAttacker(null);
-        setResolvedDefender(null);
-        setResolvedMove(null);
+        setResolvedLeftPokemon(null);
+        setResolvedRightPokemon(null);
+        setResolvedLeftMove(null);
+        setResolvedRightMove(null);
       });
-  }, [activeMove, attackerBuild, defenderBuild]);
+  }, [activeLeftMove, activeRightMove, leftBuild, rightBuild]);
 
-  const matchupInput = useMemo<BuildInput | null>(() => {
-    if (!attackerBuild || !defenderBuild) {
+  const matchupBlockingMessage = useMemo(() => {
+    if (!leftBuild || !rightBuild) {
+      return "좌우 개체를 선택하면 양방향 계산이 표시됩니다.";
+    }
+    if (!leftHasMoves && !rightHasMoves) {
+      return "왼쪽/오른쪽 개체 모두 등록된 기술이 없습니다. 개체 등록에서 기술을 1개 이상 추가해 주세요.";
+    }
+    if (!leftHasMoves) {
+      return "왼쪽 개체에 등록된 기술이 없습니다. 개체 등록에서 기술을 추가해 주세요.";
+    }
+    if (!rightHasMoves) {
+      return "오른쪽 개체에 등록된 기술이 없습니다. 개체 등록에서 기술을 추가해 주세요.";
+    }
+    return "좌우 개체와 각 기술을 선택하면 양방향 계산이 표시됩니다.";
+  }, [leftBuild, leftHasMoves, rightBuild, rightHasMoves]);
+
+  const leftAttackInput = useMemo<BuildInput | null>(() => {
+    if (!leftBuild || !rightBuild) {
       return null;
     }
 
     return {
-      pokemonName: attackerBuild.pokemonName,
-      targetPokemonName: defenderBuild.pokemonName,
-      moveName: activeMove,
-      role: attackerBuild.role,
-      teraType: attackerBuild.teraType,
-      nature: attackerBuild.nature,
-      ability: attackerBuild.ability,
-      item: attackerBuild.item,
-      evs: attackerBuild.evs,
-      ivs: attackerBuild.ivs,
-      attackerStages,
-      defenderStages,
+      pokemonName: leftBuild.pokemonName,
+      targetPokemonName: rightBuild.pokemonName,
+      moveName: activeLeftMove,
+      role: leftBuild.role,
+      teraType: leftBuild.teraType,
+      nature: leftBuild.nature,
+      ability: leftBuild.ability,
+      item: leftBuild.item,
+      evs: leftBuild.evs,
+      ivs: leftBuild.ivs,
+      attackerStages: leftStages,
+      defenderStages: rightStages,
     };
-  }, [activeMove, attackerBuild, attackerStages, defenderBuild, defenderStages]);
+  }, [activeLeftMove, leftBuild, leftStages, rightBuild, rightStages]);
 
-  const damageOptions = useMemo<DamageCalcOptions>(
+  const rightAttackInput = useMemo<BuildInput | null>(() => {
+    if (!leftBuild || !rightBuild) {
+      return null;
+    }
+
+    return {
+      pokemonName: rightBuild.pokemonName,
+      targetPokemonName: leftBuild.pokemonName,
+      moveName: activeRightMove,
+      role: rightBuild.role,
+      teraType: rightBuild.teraType,
+      nature: rightBuild.nature,
+      ability: rightBuild.ability,
+      item: rightBuild.item,
+      evs: rightBuild.evs,
+      ivs: rightBuild.ivs,
+      attackerStages: rightStages,
+      defenderStages: leftStages,
+    };
+  }, [activeRightMove, leftBuild, leftStages, rightBuild, rightStages]);
+
+  const leftDamageOptions = useMemo<DamageCalcOptions>(
     () => ({
-      attackerTeraType,
-      defenderTeraType,
-      weather,
-      attackerAbility: attackerBuild?.ability ?? "",
-      defenderAbility: defenderBuild?.ability ?? "",
+      attackerTeraType: appliedLeftTeraType,
+      defenderTeraType: appliedRightTeraType,
+      weather: appliedWeather,
+      attackerAbility: leftBuild?.ability ?? "",
+      defenderAbility: rightBuild?.ability ?? "",
     }),
-    [attackerBuild?.ability, attackerTeraType, defenderBuild?.ability, defenderTeraType, weather],
+    [appliedLeftTeraType, appliedRightTeraType, appliedWeather, leftBuild?.ability, rightBuild?.ability],
+  );
+  const rightDamageOptions = useMemo<DamageCalcOptions>(
+    () => ({
+      attackerTeraType: appliedRightTeraType,
+      defenderTeraType: appliedLeftTeraType,
+      weather: appliedWeather,
+      attackerAbility: rightBuild?.ability ?? "",
+      defenderAbility: leftBuild?.ability ?? "",
+    }),
+    [appliedLeftTeraType, appliedRightTeraType, appliedWeather, leftBuild?.ability, rightBuild?.ability],
   );
 
-  const damageEstimate = useMemo(() => {
-    if (!resolvedAttacker || !resolvedDefender || !resolvedMove || !matchupInput) {
+  const leftToRightDamage = useMemo(() => {
+    if (!resolvedLeftPokemon || !resolvedRightPokemon || !resolvedLeftMove || !leftAttackInput) {
       return null;
     }
 
     return estimateDamagePercent(
-      resolvedAttacker,
-      resolvedDefender,
-      matchupInput,
-      resolvedMove,
-      damageOptions,
+      resolvedLeftPokemon,
+      resolvedRightPokemon,
+      leftAttackInput,
+      resolvedLeftMove,
+      leftDamageOptions,
     );
-  }, [damageOptions, matchupInput, resolvedAttacker, resolvedDefender, resolvedMove]);
+  }, [leftAttackInput, leftDamageOptions, resolvedLeftMove, resolvedLeftPokemon, resolvedRightPokemon]);
 
-  const movePowerEstimate = useMemo(() => {
-    if (!resolvedAttacker || !resolvedMove || !matchupInput) {
+  const rightToLeftDamage = useMemo(() => {
+    if (!resolvedLeftPokemon || !resolvedRightPokemon || !resolvedRightMove || !rightAttackInput) {
       return null;
     }
 
-    return estimateMoveDecisivePower(resolvedAttacker, matchupInput, resolvedMove, damageOptions);
-  }, [damageOptions, matchupInput, resolvedAttacker, resolvedMove]);
+    return estimateDamagePercent(
+      resolvedRightPokemon,
+      resolvedLeftPokemon,
+      rightAttackInput,
+      resolvedRightMove,
+      rightDamageOptions,
+    );
+  }, [resolvedLeftPokemon, resolvedRightMove, resolvedRightPokemon, rightAttackInput, rightDamageOptions]);
 
   const speedCompare = useMemo(() => {
-    if (!resolvedAttacker || !resolvedDefender || !attackerBuild || !defenderBuild) {
+    if (!resolvedLeftPokemon || !resolvedRightPokemon || !leftAttackInput || !rightAttackInput) {
       return null;
     }
 
-    const attackerInput: BuildInput = {
-      pokemonName: attackerBuild.pokemonName,
-      targetPokemonName: defenderBuild.pokemonName,
-      moveName: activeMove,
-      role: attackerBuild.role,
-      teraType: attackerBuild.teraType,
-      nature: attackerBuild.nature,
-      ability: attackerBuild.ability,
-      item: attackerBuild.item,
-      evs: attackerBuild.evs,
-      ivs: attackerBuild.ivs,
-      attackerStages,
-      defenderStages,
-    };
-
-    const defenderInput: BuildInput = {
-      pokemonName: defenderBuild.pokemonName,
-      targetPokemonName: attackerBuild.pokemonName,
-      moveName: activeMove,
-      role: defenderBuild.role,
-      teraType: defenderBuild.teraType,
-      nature: defenderBuild.nature,
-      ability: defenderBuild.ability,
-      item: defenderBuild.item,
-      evs: defenderBuild.evs,
-      ivs: defenderBuild.ivs,
-      attackerStages: defenderStages,
-      defenderStages: attackerStages,
-    };
-
-    const attackerSpeed = estimateSpeed(resolvedAttacker, attackerInput);
-    const defenderSpeed = estimateSpeed(resolvedDefender, defenderInput);
-    const attackerPriority = resolvedMove?.priority ?? 0;
-    const defenderPriority = 0;
+    const leftSpeed = estimateSpeed(resolvedLeftPokemon, leftAttackInput);
+    const rightSpeed = estimateSpeed(resolvedRightPokemon, rightAttackInput);
+    const leftPriority = resolvedLeftMove?.priority ?? 0;
+    const rightPriority = resolvedRightMove?.priority ?? 0;
 
     return {
-      attackerSpeed,
-      defenderSpeed,
-      attackerPriority,
-      defenderPriority,
+      leftSpeed,
+      rightSpeed,
+      leftPriority,
+      rightPriority,
       faster:
-        attackerSpeed === defenderSpeed
-          ? "?숈냽"
-          : attackerSpeed > defenderSpeed
-            ? `${resolvedAttacker.name} ?좉났`
-            : `${resolvedDefender.name} ?좉났`,
+        leftSpeed === rightSpeed
+          ? "동속"
+          : leftSpeed > rightSpeed
+            ? `${resolvedLeftPokemon.name} 선공`
+            : `${resolvedRightPokemon.name} 선공`,
     };
-  }, [
-    attackerBuild,
-    attackerStages,
-    defenderBuild,
-    defenderStages,
-    resolvedAttacker,
-    resolvedDefender,
-    resolvedMove,
-    activeMove,
-  ]);
+  }, [leftAttackInput, resolvedLeftMove, resolvedLeftPokemon, resolvedRightMove, resolvedRightPokemon, rightAttackInput]);
 
   const speedOrderSummary = useMemo(() => {
-    if (!speedCompare || !resolvedAttacker || !resolvedDefender) {
+    if (!speedCompare || !resolvedLeftPokemon || !resolvedRightPokemon) {
       return null;
     }
 
-    const attackerPriority = resolvedMove?.priority ?? 0;
-    const defenderPriority = 0;
+    const leftPriority = resolvedLeftMove?.priority ?? 0;
+    const rightPriority = resolvedRightMove?.priority ?? 0;
 
-    if (attackerPriority !== defenderPriority) {
+    if (leftPriority !== rightPriority) {
       return {
+        firstSide: leftPriority > rightPriority ? "left" as const : "right" as const,
         faster:
-          attackerPriority > defenderPriority
-            ? `${resolvedAttacker.name} 선공`
-            : `${resolvedDefender.name} 선공`,
-        reason: `우선도 ${attackerPriority > 0 ? `+${attackerPriority}` : attackerPriority} 적용`,
+          leftPriority > rightPriority
+            ? `${resolvedLeftPokemon.name} 선공`
+            : `${resolvedRightPokemon.name} 선공`,
+        reason: `우선도 비교 (왼쪽 ${leftPriority > 0 ? `+${leftPriority}` : leftPriority} / 오른쪽 ${rightPriority > 0 ? `+${rightPriority}` : rightPriority})`,
       };
     }
 
     return {
+      firstSide:
+        speedCompare.faster === "동속"
+          ? ("left" as const)
+          : speedCompare.faster.includes(resolvedLeftPokemon.name)
+            ? ("left" as const)
+            : ("right" as const),
       faster: speedCompare.faster,
       reason: "스피드 기준",
     };
-  }, [resolvedAttacker, resolvedDefender, resolvedMove, speedCompare]);
+  }, [resolvedLeftMove, resolvedLeftPokemon, resolvedRightMove, resolvedRightPokemon, speedCompare]);
+
+  const turnSimulation = useMemo(() => {
+    if (!leftBuild || !rightBuild || !speedOrderSummary || !resolvedLeftMove || !resolvedRightMove) {
+      return null;
+    }
+
+    const leftName = leftBuild.nickname || leftBuild.pokemonName;
+    const rightName = rightBuild.nickname || rightBuild.pokemonName;
+
+    const firstSide: "left" | "right" = speedOrderSummary.firstSide;
+    const secondSide: "left" | "right" = firstSide === "left" ? "right" : "left";
+
+    const defenseReady = { left: false, right: false };
+    let firstKoGuaranteed = false;
+
+    const estimateAction = (
+      side: "left" | "right",
+      attackerHpPercent: number,
+      previousMoveName?: string,
+      movedAfterTarget?: boolean,
+      wasHitEarlierThisTurn?: boolean,
+    ) => {
+      if (!resolvedLeftPokemon || !resolvedRightPokemon || !leftAttackInput || !rightAttackInput) {
+        return null;
+      }
+      if (side === "left") {
+        return estimateDamagePercent(
+          resolvedLeftPokemon,
+          resolvedRightPokemon,
+          leftAttackInput,
+          resolvedLeftMove,
+          {
+            ...leftDamageOptions,
+            attackerCurrentHpPercent: attackerHpPercent,
+            defenderCurrentHpPercent: 100,
+            previousMoveName,
+            movedAfterTarget,
+            wasHitEarlierThisTurn,
+          },
+        );
+      }
+      return estimateDamagePercent(
+        resolvedRightPokemon,
+        resolvedLeftPokemon,
+        rightAttackInput,
+        resolvedRightMove,
+        {
+          ...rightDamageOptions,
+          attackerCurrentHpPercent: attackerHpPercent,
+          defenderCurrentHpPercent: 100,
+          previousMoveName,
+          movedAfterTarget,
+          wasHitEarlierThisTurn,
+        },
+      );
+    };
+
+    const runAction = (
+      side: "left" | "right",
+      attackerHpPercent: number,
+      previousMoveName?: string,
+      movedAfterTarget?: boolean,
+      wasHitEarlierThisTurn?: boolean,
+    ) => {
+      const actorName = side === "left" ? leftName : rightName;
+      const targetName = side === "left" ? rightName : leftName;
+      const move = side === "left" ? resolvedLeftMove : resolvedRightMove;
+      const targetSide = side === "left" ? "right" : "left";
+
+      if (isDefensiveMove(move)) {
+        defenseReady[side] = true;
+        return { summary: `${actorName}의 ${displayMoveName(move.name)}: 방어 태세를 갖췄습니다.`, expectedDamageToTarget: 0, guaranteedKo: false, adjustedPower: null as number | null, gimmickSummary: "없음" };
+      }
+
+      if (move.category === "status" || move.power === null) {
+        return { summary: `${actorName}의 ${displayMoveName(move.name)}: 변화기라 직접 데미지는 없습니다.`, expectedDamageToTarget: 0, guaranteedKo: false, adjustedPower: null as number | null, gimmickSummary: "없음" };
+      }
+
+      if (defenseReady[targetSide]) {
+        return { summary: `${actorName}의 ${displayMoveName(move.name)}: ${targetName}의 방어로 막혔습니다.`, expectedDamageToTarget: 0, guaranteedKo: false, adjustedPower: null as number | null, gimmickSummary: "없음" };
+      }
+
+      const estimate = estimateAction(
+        side,
+        attackerHpPercent,
+        previousMoveName,
+        movedAfterTarget,
+        wasHitEarlierThisTurn,
+      );
+      if (!estimate) {
+        return { summary: `${actorName}의 ${displayMoveName(move.name)}: 계산 데이터를 불러오지 못했습니다.`, expectedDamageToTarget: 0, guaranteedKo: false, adjustedPower: null as number | null, gimmickSummary: "없음" };
+      }
+
+      return {
+        summary: `${actorName}의 ${displayMoveName(move.name)} → ${targetName}: ${estimate.minPercent}% ~ ${estimate.maxPercent}% (${estimate.koState})`,
+        expectedDamageToTarget: (estimate.minPercent + estimate.maxPercent) / 2,
+        guaranteedKo: estimate.minPercent >= 100,
+        adjustedPower: estimate.movePower,
+        gimmickSummary: estimate.gimmickSummary,
+      };
+    };
+
+    const firstAction = runAction(firstSide, 100);
+    firstKoGuaranteed = firstAction.guaranteedKo;
+    const secondActorHpAfterFirstHit = Math.max(0, 100 - firstAction.expectedDamageToTarget);
+    const secondAction = firstKoGuaranteed
+      ? {
+          summary: `${secondSide === "left" ? leftName : rightName}은(는) 확정 1타 가정으로 행동하지 못합니다.`,
+          adjustedPower: null as number | null,
+          gimmickSummary: "없음",
+        }
+      : (() => {
+          const firstMoveName = firstSide === "left" ? resolvedLeftMove.name : resolvedRightMove.name;
+          const result = runAction(
+            secondSide,
+            secondActorHpAfterFirstHit,
+            firstMoveName,
+            true,
+            firstAction.expectedDamageToTarget > 0,
+          );
+          return { summary: result.summary, adjustedPower: result.adjustedPower, gimmickSummary: result.gimmickSummary };
+        })();
+
+    return {
+      firstActionSummary: firstAction.summary,
+      firstActionGimmicks: firstAction.gimmickSummary,
+      secondActionSummary: secondAction.summary,
+      secondActionGimmicks: secondAction.gimmickSummary,
+      secondActorHpAfterFirstHit: Math.round(secondActorHpAfterFirstHit * 10) / 10,
+      secondActionPower: secondAction.adjustedPower,
+    };
+  }, [
+    leftBuild,
+    leftAttackInput,
+    leftDamageOptions,
+    resolvedLeftMove,
+    resolvedLeftPokemon,
+    resolvedRightMove,
+    resolvedRightPokemon,
+    rightAttackInput,
+    rightBuild,
+    rightDamageOptions,
+    speedOrderSummary,
+  ]);
 
   const addBuild = () => {
     const learnsetSet = new Set(learnsetMoves.map((move) => normalize(displayMoveName(move))));
@@ -689,27 +956,24 @@ export function CompetitiveAssistant() {
     ];
 
     if (!pokemonName.trim()) {
-      setNotice("?ъ폆紐??대쫫???낅젰??二쇱꽭??");
+      setNotice("포켓몬 이름을 입력해 주세요.");
       return;
     }
 
-    if (learnsetStatus !== "ready") {
-      setNotice("?숈뒿 湲곗닠 ?곗씠?곕? ?꾩쭅 遺덈윭?ㅼ? 紐삵뻽?듬땲?? ?좎떆 ???ㅼ떆 ?쒕룄??二쇱꽭??");
+    const enteredMoves = trimmedMoves.filter((move) => move.trim().length > 0);
+
+    if (enteredMoves.length > 0 && learnsetStatus !== "ready") {
+      setNotice("학습 기술 데이터를 아직 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.");
       return;
     }
 
-    if (trimmedMoves.some((move) => !move)) {
-      setNotice("諛곗슱 湲곗닠 4媛쒕? 紐⑤몢 ?낅젰??二쇱꽭??");
-      return;
-    }
-
-    if (trimmedMoves.some((move) => !learnsetSet.has(normalize(move)))) {
-      setNotice("?낅젰??湲곗닠 以??ㅼ젣濡??대떦 ?ъ폆紐ъ씠 諛곗슦吏 紐삵븯??湲곗닠???덉뒿?덈떎.");
+    if (enteredMoves.some((move) => !learnsetSet.has(normalize(move)))) {
+      setNotice("입력한 기술 중 실제로 해당 포켓몬이 배우지 못하는 기술이 있습니다.");
       return;
     }
 
     if (getSpreadTotal(evs) > MAX_TOTAL_EVS) {
-      setNotice(`?몃젰移?珥앺빀? ${MAX_TOTAL_EVS}瑜??섍만 ???놁뒿?덈떎.`);
+      setNotice(`노력치 총합은 ${MAX_TOTAL_EVS}를 넘길 수 없습니다.`);
       return;
     }
 
@@ -724,11 +988,11 @@ export function CompetitiveAssistant() {
       item: item.trim(),
       evs,
       ivs,
-      moves: trimmedMoves,
+      moves: enteredMoves,
     };
 
     setRegisteredBuilds((prev) => [...prev, entity]);
-    setNotice(`${entity.nickname || entity.pokemonName} 媛쒖껜瑜??깅줉?덉뒿?덈떎.`);
+    setNotice(`${entity.nickname || entity.pokemonName} 개체를 등록했습니다.`);
 
     if (!leftId) {
       setLeftId(entity.id);
@@ -742,7 +1006,7 @@ export function CompetitiveAssistant() {
       <div className="pk-hud mb-6 flex items-center justify-between gap-3 p-3 md:p-4">
         <div>
           <p className="pk-pill">SV BATTLE BUILDER</p>
-          <h1 className="mt-2 text-xl font-black tracking-tight text-slate-900 md:text-2xl">?ъ폆紐??ㅼ쟾 媛쒖껜 ?꾧컧</h1>
+          <h1 className="mt-2 text-xl font-black tracking-tight text-slate-900 md:text-2xl">포켓몬 실전 개체 도감</h1>
         </div>
         <div className="hidden h-14 w-14 items-center justify-center rounded-full border-4 border-slate-900 bg-gradient-to-b from-red-500 to-red-600 md:flex">
           <div className="h-4 w-4 rounded-full border-2 border-slate-900 bg-white" />
@@ -755,14 +1019,14 @@ export function CompetitiveAssistant() {
           onClick={() => setTab("builder")}
           className={`px-4 py-2 text-sm font-semibold transition ${tab === "builder" ? "pk-tab-active" : "pk-tab-idle"}`}
         >
-          媛쒖껜 異붽?
+          개체 추가
         </button>
         <button
           type="button"
           onClick={() => setTab("matchup")}
           className={`px-4 py-2 text-sm font-semibold transition ${tab === "matchup" ? "pk-tab-active" : "pk-tab-idle"}`}
         >
-          留ㅼ튂??
+          매치업
         </button>
       </div>
 
@@ -772,11 +1036,11 @@ export function CompetitiveAssistant() {
 
       {tab === "builder" ? (
         <div className="pk-grid-bg space-y-4 rounded-2xl p-2 md:p-3">
-          <h2 className="pk-section-title text-lg text-slate-900">?좉퇋 媛쒖껜 ?깅줉</h2>
+          <h2 className="pk-section-title text-lg text-slate-900">신규 개체 등록</h2>
 
           <div className="grid gap-4 md:grid-cols-3">
             <label className="grid gap-1 text-sm text-slate-700">
-              蹂꾩묶(?좏깮)
+              별칭(선택)
               <input
                 value={nickname}
                 onChange={(event) => setNickname(event.target.value)}
@@ -785,7 +1049,7 @@ export function CompetitiveAssistant() {
               />
             </label>
             <label className="grid gap-1 text-sm text-slate-700">
-              ?ъ폆紐??대쫫
+              포켓몬 이름
               <input
                 list="builder-pokemon"
                 value={pokemonName}
@@ -800,7 +1064,7 @@ export function CompetitiveAssistant() {
               </datalist>
             </label>
             <label className="grid gap-1 text-sm text-slate-700">
-              ??븷
+              역할
               <select
                 value={role}
                 onChange={(event) => setRole(event.target.value as PokemonRole)}
@@ -817,12 +1081,12 @@ export function CompetitiveAssistant() {
 
           {builderPokemonEntry ? (
             <div className="pk-card pk-card-soft p-3">
-              <h3 className="mb-2 text-sm font-semibold text-slate-900">?좏깮 ?ъ폆紐??쇰윭?ㅽ듃</h3>
+              <h3 className="mb-2 text-sm font-semibold text-slate-900">선택 포켓몬 일러스트</h3>
               <div className="grid gap-4 lg:grid-cols-[220px_1fr]">
                 <div className="flex items-center gap-4">
                   <Image
                     src={getPokemonArtworkUrl(builderPokemonEntry)}
-                    alt={`${builderPokemonEntry.name} ?쇰윭?ㅽ듃`}
+                    alt={`${builderPokemonEntry.name} 일러스트`}
                     width={112}
                     height={112}
                     className="h-28 w-28 rounded-lg bg-white p-1 shadow"
@@ -835,9 +1099,9 @@ export function CompetitiveAssistant() {
                       ))}
                     </div>
                     <p>
-                      ??? {builderPokemonEntry.types.map((type) => TYPE_LABELS_KO[type] ?? type).join(" / ")}
+                      타입: {builderPokemonEntry.types.map((type) => TYPE_LABELS_KO[type] ?? type).join(" / ")}
                     </p>
-                    <p>?뱀꽦: {builderPokemonEntry.abilities.join(", ")}</p>
+                    <p>특성: {builderPokemonEntry.abilities.join(", ")}</p>
                   </div>
                 </div>
 
@@ -851,14 +1115,14 @@ export function CompetitiveAssistant() {
                     overflowCap={BASE_STAT_RADAR_OVERFLOW_CAP}
                   />
                   <StatRadarChart
-                    title="媛쒖껜媛?IV)"
+                    title="개체값(IV)"
                     spread={ivs}
                     maxValue={31}
                     stroke="rgba(37,99,235,1)"
                     fill="rgba(37,99,235,0.22)"
                   />
                   <StatRadarChart
-                    title="?몃젰移?EV)"
+                    title="노력치(EV)"
                     spread={evs}
                     maxValue={252}
                     stroke="rgba(16,185,129,1)"
@@ -871,7 +1135,7 @@ export function CompetitiveAssistant() {
 
           <div className="grid gap-4 md:grid-cols-4">
             <label className="grid gap-1 text-sm text-slate-700">
-              ?깃꺽
+              성격
               <select
                 value={nature}
                 onChange={(event) => setNature(event.target.value)}
@@ -885,7 +1149,7 @@ export function CompetitiveAssistant() {
               </select>
             </label>
             <label className="grid gap-1 text-sm text-slate-700">
-              ?뱀꽦
+              특성
               <select
                 value={ability}
                 onChange={(event) => setAbility(event.target.value)}
@@ -903,7 +1167,7 @@ export function CompetitiveAssistant() {
               </select>
             </label>
             <label className="grid gap-1 text-sm text-slate-700">
-              ?꾧뎄
+              도구
               <input
                 list="builder-item"
                 value={item}
@@ -917,7 +1181,7 @@ export function CompetitiveAssistant() {
               </datalist>
             </label>
             <label className="grid gap-1 text-sm text-slate-700">
-              ?뚮씪 ???
+              테라 타입
               <select
                 value={teraType}
                 onChange={(event) => setTeraType(event.target.value as TeraType | "")}
@@ -936,9 +1200,9 @@ export function CompetitiveAssistant() {
 
           <div className="grid gap-4 md:grid-cols-2">
             <div className="pk-card p-3">
-              <h3 className="mb-2 text-sm font-semibold text-slate-900">?몃젰移?EV)</h3>
+              <h3 className="mb-2 text-sm font-semibold text-slate-900">노력치(EV)</h3>
               <p className="mb-2 text-xs font-semibold text-slate-600">
-                珥앺빀 {evTotal}/{MAX_TOTAL_EVS}
+                총합 {evTotal}/{MAX_TOTAL_EVS}
               </p>
               {STAT_KEYS.map((stat) => (
                 <label key={`ev-${stat}`} className="mb-1 grid grid-cols-2 items-center gap-2 text-sm">
@@ -956,7 +1220,7 @@ export function CompetitiveAssistant() {
               ))}
             </div>
             <div className="pk-card p-3">
-              <h3 className="mb-2 text-sm font-semibold text-slate-900">媛쒖껜媛?IV)</h3>
+              <h3 className="mb-2 text-sm font-semibold text-slate-900">개체값(IV)</h3>
               {STAT_KEYS.map((stat) => (
                 <label key={`iv-${stat}`} className="mb-1 grid grid-cols-2 items-center gap-2 text-sm">
                   <span>{STAT_LABELS[stat]}</span>
@@ -979,20 +1243,20 @@ export function CompetitiveAssistant() {
           <div className="pk-card border-amber-200 bg-amber-50/70 p-3">
             <h3 className="mb-2 text-sm font-semibold text-slate-900">배운 기술 4개</h3>
             <p className="mb-2 text-xs text-slate-600">
-              ?깅줉 媛?ν븳 湲곗닠? ?대떦 ?ъ폆紐ъ씠 ?ㅼ젣濡?諛곗슱 ???덈뒗 湲곗닠留??덉슜?⑸땲??
+              등록 가능한 기술은 해당 포켓몬이 실제로 배울 수 있는 기술만 허용됩니다.
             </p>
             {learnsetStatus === "loading" ? (
-              <p className="mb-2 text-xs text-slate-600">?숈뒿 湲곗닠 紐⑸줉??遺덈윭?ㅻ뒗 以?..</p>
+              <p className="mb-2 text-xs text-slate-600">학습 기술 목록을 불러오는 중...</p>
             ) : null}
             {learnsetStatus === "error" ? (
-              <p className="mb-2 text-xs text-rose-700">?숈뒿 湲곗닠 紐⑸줉 議고쉶???ㅽ뙣?덉뒿?덈떎. ?좎떆 ???ㅼ떆 ?쒕룄??二쇱꽭??</p>
+              <p className="mb-2 text-xs text-rose-700">학습 기술 목록 조회에 실패했습니다. 잠시 후 다시 시도해 주세요.</p>
             ) : null}
             <div className="grid gap-3 md:grid-cols-2">
               {MOVE_SLOT_IDS.map((slotId, index) => {
                 const move = moves[index];
                 return (
                 <label key={slotId} className="grid gap-1 text-sm text-slate-700">
-                  湲곗닠 {index + 1}
+                  기술 {index + 1}
                   <input
                     list="builder-learnset"
                     value={move}
@@ -1021,22 +1285,22 @@ export function CompetitiveAssistant() {
             onClick={addBuild}
                 className="pk-primary-btn px-4 py-2 text-sm"
           >
-            媛쒖껜 ?깅줉
+            개체 등록
           </button>
         </div>
       ) : (
         <div className="pk-grid-bg space-y-4 rounded-2xl p-2 md:p-3">
-          <h2 className="pk-section-title text-lg text-slate-900">?깅줉 媛쒖껜 留ㅼ튂??鍮꾧탳</h2>
+          <h2 className="pk-section-title text-lg text-slate-900">등록 개체 매치업 비교</h2>
 
           <div className="grid gap-4 md:grid-cols-2">
             <label className="grid gap-1 text-sm text-slate-700">
-              ?쇱そ 媛쒖껜
+              왼쪽 개체
               <select
                 value={leftId}
                 onChange={(event) => setLeftId(event.target.value)}
                 className="pk-control"
               >
-                <option value="">?좏깮</option>
+                <option value="">선택</option>
                 {registeredBuilds.map((entry) => (
                   <option key={entry.id} value={entry.id}>
                     {entry.nickname || entry.pokemonName}
@@ -1046,13 +1310,13 @@ export function CompetitiveAssistant() {
             </label>
 
             <label className="grid gap-1 text-sm text-slate-700">
-              ?ㅻⅨ履?媛쒖껜
+              오른쪽 개체
               <select
                 value={rightId}
                 onChange={(event) => setRightId(event.target.value)}
                 className="pk-control"
               >
-                <option value="">?좏깮</option>
+                <option value="">선택</option>
                 {registeredBuilds.map((entry) => (
                   <option key={entry.id} value={entry.id}>
                     {entry.nickname || entry.pokemonName}
@@ -1064,40 +1328,53 @@ export function CompetitiveAssistant() {
 
           <div className="grid gap-4 md:grid-cols-3">
             <label className="grid gap-1 text-sm text-slate-700">
-              怨듦꺽痢?
+              왼쪽 기술
               <select
-                value={attackerSide}
-                onChange={(event) => setAttackerSide(event.target.value as "left" | "right")}
+                value={activeLeftMove}
+                onChange={(event) => setLeftSelectedMove(event.target.value)}
                 className="pk-control"
+                disabled={!leftHasMoves}
               >
-                <option value="left">?쇱そ</option>
-                <option value="right">오른쪽</option>
+                {!leftHasMoves ? (
+                  <option value="">등록된 기술 없음</option>
+                ) : (
+                  leftMoveOptions.map((move) => (
+                    <option key={`left-move-${move}`} value={move}>
+                      {displayMoveName(move)}
+                    </option>
+                  ))
+                )}
               </select>
             </label>
 
             <label className="grid gap-1 text-sm text-slate-700">
-              ?ъ슜 湲곗닠
+              오른쪽 기술
               <select
-                value={activeMove}
-                onChange={(event) => setSelectedMove(event.target.value)}
+                value={activeRightMove}
+                onChange={(event) => setRightSelectedMove(event.target.value)}
                 className="pk-control"
+                disabled={!rightHasMoves}
               >
-                {attackerMoveOptions.map((move) => (
-                  <option key={move} value={move}>
-                    {displayMoveName(move)}
-                  </option>
-                ))}
+                {!rightHasMoves ? (
+                  <option value="">등록된 기술 없음</option>
+                ) : (
+                  rightMoveOptions.map((move) => (
+                    <option key={`right-move-${move}`} value={move}>
+                      {displayMoveName(move)}
+                    </option>
+                  ))
+                )}
               </select>
             </label>
 
             <label className="grid gap-1 text-sm text-slate-700">
-              ?좎뵪
+              환경 효과
               <select
-                value={weather}
-                onChange={(event) => setWeather(event.target.value as BattleWeather)}
+                value={battleEffect}
+                onChange={(event) => setBattleEffect(event.target.value as BattleEffect)}
                 className="pk-control"
               >
-                {WEATHER_OPTIONS.map((entry) => (
+                {BATTLE_EFFECT_OPTIONS.map((entry) => (
                   <option key={entry.value} value={entry.value}>
                     {entry.label}
                   </option>
@@ -1109,22 +1386,11 @@ export function CompetitiveAssistant() {
           <div className="grid gap-4 md:grid-cols-2">
             <div className="pk-card p-3">
               <h3 className="mb-2 text-sm font-semibold text-slate-900">왼쪽 포켓몬</h3>
-              {leftBuild && resolvedAttacker && attackerSide === "left" ? (
+              {leftBuild && resolvedLeftPokemon ? (
                 <div className="flex items-center gap-3">
                   <Image
-                    src={getPokemonArtworkUrl(resolvedAttacker)}
-                    alt={`${resolvedAttacker.name} ?쇰윭?ㅽ듃`}
-                    width={96}
-                    height={96}
-                    className="h-24 w-24 rounded-lg bg-white p-1 shadow"
-                  />
-                  <p className="text-sm text-slate-700">{leftBuild.nickname || leftBuild.pokemonName}</p>
-                </div>
-              ) : leftBuild && resolvedDefender && attackerSide === "right" ? (
-                <div className="flex items-center gap-3">
-                  <Image
-                    src={getPokemonArtworkUrl(resolvedDefender)}
-                    alt={`${resolvedDefender.name} ?쇰윭?ㅽ듃`}
+                    src={getPokemonArtworkUrl(resolvedLeftPokemon)}
+                    alt={`${resolvedLeftPokemon.name} 일러스트`}
                     width={96}
                     height={96}
                     className="h-24 w-24 rounded-lg bg-white p-1 shadow"
@@ -1132,28 +1398,17 @@ export function CompetitiveAssistant() {
                   <p className="text-sm text-slate-700">{leftBuild.nickname || leftBuild.pokemonName}</p>
                 </div>
               ) : (
-                <p className="text-sm text-slate-600">?쇱そ 媛쒖껜瑜??좏깮?섎㈃ ?쇰윭?ㅽ듃媛 ?쒖떆?⑸땲??</p>
+                <p className="text-sm text-slate-600">왼쪽 개체를 선택하면 일러스트가 표시됩니다.</p>
               )}
             </div>
 
             <div className="pk-card p-3">
               <h3 className="mb-2 text-sm font-semibold text-slate-900">오른쪽 포켓몬</h3>
-              {rightBuild && resolvedDefender && attackerSide === "left" ? (
+              {rightBuild && resolvedRightPokemon ? (
                 <div className="flex items-center gap-3">
                   <Image
-                    src={getPokemonArtworkUrl(resolvedDefender)}
-                    alt={`${resolvedDefender.name} ?쇰윭?ㅽ듃`}
-                    width={96}
-                    height={96}
-                    className="h-24 w-24 rounded-lg bg-white p-1 shadow"
-                  />
-                  <p className="text-sm text-slate-700">{rightBuild.nickname || rightBuild.pokemonName}</p>
-                </div>
-              ) : rightBuild && resolvedAttacker && attackerSide === "right" ? (
-                <div className="flex items-center gap-3">
-                  <Image
-                    src={getPokemonArtworkUrl(resolvedAttacker)}
-                    alt={`${resolvedAttacker.name} ?쇰윭?ㅽ듃`}
+                    src={getPokemonArtworkUrl(resolvedRightPokemon)}
+                    alt={`${resolvedRightPokemon.name} 일러스트`}
                     width={96}
                     height={96}
                     className="h-24 w-24 rounded-lg bg-white p-1 shadow"
@@ -1161,49 +1416,47 @@ export function CompetitiveAssistant() {
                   <p className="text-sm text-slate-700">{rightBuild.nickname || rightBuild.pokemonName}</p>
                 </div>
               ) : (
-                <p className="text-sm text-slate-600">?ㅻⅨ履?媛쒖껜瑜??좏깮?섎㈃ ?쇰윭?ㅽ듃媛 ?쒖떆?⑸땲??</p>
+                <p className="text-sm text-slate-600">오른쪽 개체를 선택하면 일러스트가 표시됩니다.</p>
               )}
             </div>
           </div>
 
-          <div className="grid gap-4 md:grid-cols-2">
-            <label className="grid gap-1 text-sm text-slate-700">
-              怨듦꺽痢??뚮씪(怨꾩궛??
-              <select
-                value={attackerTeraType}
-                onChange={(event) => setAttackerTeraType(event.target.value as TeraType | "")}
-                className="pk-control"
+          <div className="grid gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700 md:grid-cols-2">
+            <div className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-white px-3 py-2">
+              <span>
+                왼쪽 테라스탈
+                {" "}
+                ({leftRegisteredTeraType ? TYPE_LABELS_KO[leftRegisteredTeraType] ?? leftRegisteredTeraType : "미설정"})
+              </span>
+              <button
+                type="button"
+                className={`rounded-md px-3 py-1 font-semibold ${leftTeraEnabled ? "bg-emerald-500 text-white" : "bg-slate-300 text-slate-700"} ${!leftRegisteredTeraType ? "cursor-not-allowed opacity-50" : ""}`}
+                onClick={() => setLeftTeraEnabled((prev) => !prev)}
+                disabled={!leftRegisteredTeraType}
               >
-                <option value="">미적용</option>
-                {TERA_TYPES.map((type) => (
-                  <option key={`atk-tera-${type}`} value={type}>
-                    {TYPE_LABELS_KO[type] ?? type}
-                  </option>
-                ))}
-              </select>
-              {attackerTeraType ? <TypeBadge type={attackerTeraType} /> : null}
-            </label>
-            <label className="grid gap-1 text-sm text-slate-700">
-              諛⑹뼱痢??뚮씪(怨꾩궛??
-              <select
-                value={defenderTeraType}
-                onChange={(event) => setDefenderTeraType(event.target.value as TeraType | "")}
-                className="rounded-lg border border-slate-300 bg-white px-3 py-2"
+                {leftTeraEnabled ? "ON" : "OFF"}
+              </button>
+            </div>
+            <div className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-white px-3 py-2">
+              <span>
+                오른쪽 테라스탈
+                {" "}
+                ({rightRegisteredTeraType ? TYPE_LABELS_KO[rightRegisteredTeraType] ?? rightRegisteredTeraType : "미설정"})
+              </span>
+              <button
+                type="button"
+                className={`rounded-md px-3 py-1 font-semibold ${rightTeraEnabled ? "bg-emerald-500 text-white" : "bg-slate-300 text-slate-700"} ${!rightRegisteredTeraType ? "cursor-not-allowed opacity-50" : ""}`}
+                onClick={() => setRightTeraEnabled((prev) => !prev)}
+                disabled={!rightRegisteredTeraType}
               >
-                <option value="">미적용</option>
-                {TERA_TYPES.map((type) => (
-                  <option key={`def-tera-${type}`} value={type}>
-                    {TYPE_LABELS_KO[type] ?? type}
-                  </option>
-                ))}
-              </select>
-              {defenderTeraType ? <TypeBadge type={defenderTeraType} /> : null}
-            </label>
+                {rightTeraEnabled ? "ON" : "OFF"}
+              </button>
+            </div>
           </div>
 
           <div className="grid gap-4 md:grid-cols-2">
             <div className="pk-card p-3">
-              <h3 className="mb-2 text-sm font-semibold text-slate-900">?쇱そ ??겕 蹂댁젙</h3>
+              <h3 className="mb-2 text-sm font-semibold text-slate-900">왼쪽 랭크 보정</h3>
               {STAT_KEYS.filter((stat) => stat !== "hp").map((stat) => (
                 <label key={`left-${stat}`} className="mb-1 grid grid-cols-2 items-center gap-2 text-sm">
                   <span>{STAT_LABELS[stat]}</span>
@@ -1221,7 +1474,7 @@ export function CompetitiveAssistant() {
               ))}
             </div>
             <div className="pk-card p-3">
-              <h3 className="mb-2 text-sm font-semibold text-slate-900">?ㅻⅨ履???겕 蹂댁젙</h3>
+              <h3 className="mb-2 text-sm font-semibold text-slate-900">오른쪽 랭크 보정</h3>
               {STAT_KEYS.filter((stat) => stat !== "hp").map((stat) => (
                 <label key={`right-${stat}`} className="mb-1 grid grid-cols-2 items-center gap-2 text-sm">
                   <span>{STAT_LABELS[stat]}</span>
@@ -1241,34 +1494,52 @@ export function CompetitiveAssistant() {
           </div>
 
           <div className="pk-card border-emerald-200 bg-emerald-50/75 p-4">
-            <h3 className="mb-2 text-sm font-semibold text-slate-900">留ㅼ튂??怨꾩궛 寃곌낵</h3>
-            {damageEstimate && attackerBuild && defenderBuild ? (
+            <h3 className="mb-2 text-sm font-semibold text-slate-900">매치업 계산 결과</h3>
+            {leftToRightDamage && rightToLeftDamage && leftBuild && rightBuild ? (
               <div className="space-y-1 text-sm text-slate-700">
-                <p>{attackerBuild.nickname || attackerBuild.pokemonName} {displayMoveName(activeMove)} ??{defenderBuild.nickname || defenderBuild.pokemonName}: {damageEstimate.minPercent}% ~ {damageEstimate.maxPercent}%</p>
-                <p>1? ?먯젙: {damageEstimate.koState}</p>
-                <p>?곸꽦 ?먯젙: {damageEstimate.effectivenessLabel}</p>
-                <p>寃곗젙?? {damageEstimate.decisivePower}</p>
-                <p className="text-xs text-slate-600">{damageEstimate.modifierSummary}</p>
-                <p className="text-xs text-slate-600">{damageEstimate.abilitySummary}</p>
+                <p className="text-xs text-slate-600">환경 효과: {selectedEffectOption.label}</p>
+                {selectedEffectOption.weather === "none" && selectedEffectOption.value !== "none" ? (
+                  <p className="text-xs text-slate-500">필드 효과는 현재 데미지 보정에 아직 반영되지 않고 표시용으로만 사용됩니다.</p>
+                ) : null}
               </div>
             ) : (
-              <p className="text-sm text-slate-700">醫뚯슦 媛쒖껜瑜??좏깮?섍퀬 怨듦꺽 湲곗닠??吏?뺥븯硫?怨꾩궛?⑸땲??</p>
+              <p className="text-sm text-slate-700">{matchupBlockingMessage}</p>
             )}
 
-            {movePowerEstimate ? (
-              <p className="mt-2 text-xs text-slate-600">
-                기술 단일 결정력: {movePowerEstimate.decisivePower} ({movePowerEstimate.summary})
-              </p>
-            ) : null}
-
-            {speedCompare && speedOrderSummary ? (
+            {speedCompare && speedOrderSummary && turnSimulation ? (
               <>
                 <p className="mt-2 text-sm text-slate-700">
-                  스피드 비교: 공격측 {speedCompare.attackerSpeed} / 방어측 {speedCompare.defenderSpeed} ({speedCompare.faster})
+                  스피드 비교: 왼쪽 {speedCompare.leftSpeed} / 오른쪽 {speedCompare.rightSpeed} ({speedCompare.faster})
                 </p>
                 <p className="text-xs text-slate-600">
-                  행동 순서: {speedOrderSummary.faster} ({speedOrderSummary.reason}, 상대 우선도 0 가정)
+                  행동 순서: {speedOrderSummary.faster} ({speedOrderSummary.reason})
                 </p>
+                <p className="text-xs text-slate-700">1행동: {turnSimulation.firstActionSummary}</p>
+                <p className="text-xs text-slate-600">1행동 기믹: {turnSimulation.firstActionGimmicks}</p>
+                {gimmickTags(turnSimulation.firstActionGimmicks).length > 0 ? (
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {gimmickTags(turnSimulation.firstActionGimmicks).map((tag) => (
+                      <span key={`first-gimmick-${tag}`} className="rounded-full border border-emerald-300 bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800">
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                <p className="text-xs text-slate-700">2행동: {turnSimulation.secondActionSummary}</p>
+                <p className="text-xs text-slate-600">2행동 기믹: {turnSimulation.secondActionGimmicks}</p>
+                {gimmickTags(turnSimulation.secondActionGimmicks).length > 0 ? (
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {gimmickTags(turnSimulation.secondActionGimmicks).map((tag) => (
+                      <span key={`second-gimmick-${tag}`} className="rounded-full border border-sky-300 bg-sky-100 px-2 py-0.5 text-[11px] font-semibold text-sky-800">
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                <p className="text-xs text-slate-600">첫 타 후 후공측 예상 잔여 HP: {turnSimulation.secondActorHpAfterFirstHit}%</p>
+                {typeof turnSimulation.secondActionPower === "number" ? (
+                  <p className="text-xs text-slate-600">후공 기술 적용 위력(HP 반영): {turnSimulation.secondActionPower}</p>
+                ) : null}
               </>
             ) : null}
           </div>

@@ -89,6 +89,11 @@ export type DamageCalcOptions = {
   weather: BattleWeather;
   attackerAbility?: string;
   defenderAbility?: string;
+  attackerCurrentHpPercent?: number;
+  defenderCurrentHpPercent?: number;
+  previousMoveName?: string;
+  movedAfterTarget?: boolean;
+  wasHitEarlierThisTurn?: boolean;
 };
 
 export type TeamSlot = {

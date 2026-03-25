@@ -23,6 +23,8 @@ type DamageEstimate = {
   movePower: number;
   koState: string;
   abilitySummary: string;
+  gimmickSummary: string;
+  appliedGimmicks: string[];
 };
 
 function hasAbility(abilityName: string | undefined, candidates: string[]): boolean {
@@ -188,6 +190,205 @@ function isTeraBlast(moveName: string): boolean {
   return normalized === "tera blast" || normalized === "tera-blast" || normalized === "테라버스트";
 }
 
+function clampPercent(value: number | undefined): number {
+  if (!Number.isFinite(value)) {
+    return 100;
+  }
+  return clamp(value as number, 0, 100);
+}
+
+function getFlailStylePower(attackerHpPercent: number): number {
+  if (attackerHpPercent <= 2.083) {
+    return 200;
+  }
+  if (attackerHpPercent <= 8.333) {
+    return 150;
+  }
+  if (attackerHpPercent <= 18.75) {
+    return 100;
+  }
+  if (attackerHpPercent <= 33.333) {
+    return 80;
+  }
+  if (attackerHpPercent <= 66.667) {
+    return 40;
+  }
+  return 20;
+}
+
+function applyHpBasedMovePower(
+  move: MoveEntry,
+  attackerHpPercent: number,
+  defenderHpPercent: number,
+): MoveEntry {
+  if (move.power === null || move.category === "status") {
+    return move;
+  }
+
+  const normalized = move.name.trim().toLowerCase();
+  let power = move.power;
+
+  if (
+    normalized === "eruption" ||
+    normalized === "water spout" ||
+    normalized === "dragon energy" ||
+    normalized === "분화" ||
+    normalized === "해수스파우팅" ||
+    normalized === "드래곤에너지"
+  ) {
+    power = Math.max(1, Math.floor(150 * (attackerHpPercent / 100)));
+  } else if (
+    normalized === "flail" ||
+    normalized === "reversal" ||
+    normalized === "바둥바둥" ||
+    normalized === "기사회생"
+  ) {
+    power = getFlailStylePower(attackerHpPercent);
+  } else if (normalized === "brine" || normalized === "염수") {
+    power = defenderHpPercent <= 50 ? move.power * 2 : move.power;
+  } else if (
+    normalized === "crush grip" ||
+    normalized === "wring out" ||
+    normalized === "hard press" ||
+    normalized === "쥐어짜기" ||
+    normalized === "쥐어뜯기" ||
+    normalized === "하드프레스"
+  ) {
+    power = Math.max(1, Math.floor(120 * (defenderHpPercent / 100)) + 1);
+  }
+
+  return {
+    ...move,
+    power,
+  };
+}
+
+function applyComboMovePower(move: MoveEntry, previousMoveName: string | undefined): MoveEntry {
+  if (move.power === null || move.category === "status" || !previousMoveName) {
+    return move;
+  }
+
+  const current = move.name.trim().toLowerCase();
+  const previous = previousMoveName.trim().toLowerCase();
+
+  const isCrossThunder =
+    current === "cross thunder" || current === "cross-thunder" || current === "크로스썬더";
+  const isCrossFlame =
+    current === "cross flame" || current === "cross-flame" || current === "크로스플레임";
+  const previousIsCrossThunder =
+    previous === "cross thunder" || previous === "cross-thunder" || previous === "크로스썬더";
+  const previousIsCrossFlame =
+    previous === "cross flame" || previous === "cross-flame" || previous === "크로스플레임";
+
+  if ((isCrossThunder && previousIsCrossFlame) || (isCrossFlame && previousIsCrossThunder)) {
+    return {
+      ...move,
+      power: move.power * 2,
+    };
+  }
+
+  return move;
+}
+
+function applyOrderBasedMovePower(
+  move: MoveEntry,
+  movedAfterTarget: boolean | undefined,
+  wasHitEarlierThisTurn: boolean | undefined,
+): { move: MoveEntry; notes: string[] } {
+  if (move.power === null || move.category === "status") {
+    return { move, notes: [] };
+  }
+
+  const normalized = move.name.trim().toLowerCase();
+  const notes: string[] = [];
+  let power = move.power;
+
+  if ((normalized === "payback" || normalized === "보복") && movedAfterTarget) {
+    power *= 2;
+    notes.push("보복: 후공으로 위력 2배");
+  }
+
+  if (
+    (normalized === "avalanche" || normalized === "눈사태" || normalized === "revenge" || normalized === "리벤지") &&
+    wasHitEarlierThisTurn
+  ) {
+    power *= 2;
+    notes.push("눈사태/리벤지: 선행 피격으로 위력 2배");
+  }
+
+  return {
+    move: {
+      ...move,
+      power,
+    },
+    notes,
+  };
+}
+
+function applyItemBasedMovePower(move: MoveEntry, heldItem: string): { move: MoveEntry; notes: string[] } {
+  if (move.power === null || move.category === "status") {
+    return { move, notes: [] };
+  }
+
+  const normalizedMove = move.name.trim().toLowerCase();
+  const normalizedItem = heldItem.trim().toLowerCase();
+  const notes: string[] = [];
+  let power = move.power;
+
+  if (
+    (normalizedMove === "acrobatics" || normalizedMove === "애크러뱃") &&
+    normalizedItem.length === 0
+  ) {
+    power *= 2;
+    notes.push("애크러뱃: 도구 미소지로 위력 2배");
+  }
+
+  return {
+    move: {
+      ...move,
+      power,
+    },
+    notes,
+  };
+}
+
+function resolveMovePowerWithGimmicks(
+  move: MoveEntry,
+  input: BuildInput,
+  options: DamageCalcOptions,
+): { move: MoveEntry; notes: string[] } {
+  const notes: string[] = [];
+
+  const hpAdjusted = applyHpBasedMovePower(
+    move,
+    clampPercent(options.attackerCurrentHpPercent),
+    clampPercent(options.defenderCurrentHpPercent),
+  );
+  if (hpAdjusted.power !== move.power) {
+    notes.push("HP 비례 위력 반영");
+  }
+
+  const comboAdjusted = applyComboMovePower(hpAdjusted, options.previousMoveName);
+  if (comboAdjusted.power !== hpAdjusted.power) {
+    notes.push("크로스 기믹: 짝 기술 선행으로 위력 2배");
+  }
+
+  const orderAdjusted = applyOrderBasedMovePower(
+    comboAdjusted,
+    options.movedAfterTarget,
+    options.wasHitEarlierThisTurn,
+  );
+  notes.push(...orderAdjusted.notes);
+
+  const itemAdjusted = applyItemBasedMovePower(orderAdjusted.move, input.item);
+  notes.push(...itemAdjusted.notes);
+
+  return {
+    move: itemAdjusted.move,
+    notes,
+  };
+}
+
 function resolveEffectiveMove(
   attacker: PokemonEntry,
   input: BuildInput,
@@ -300,13 +501,15 @@ export function estimateMoveDecisivePower(
   move: MoveEntry,
   options: DamageCalcOptions,
 ): { decisivePower: number; attackStat: number; movePower: number; summary: string } | null {
-  const effectiveMove = resolveEffectiveMove(attacker, input, move, options);
+  const teraResolvedMove = resolveEffectiveMove(attacker, input, move, options);
+  const moveResult = resolveMovePowerWithGimmicks(teraResolvedMove, input, options);
+  const comboAdjustedMove = moveResult.move;
 
-  if (effectiveMove.category === "status" || effectiveMove.power === null) {
+  if (comboAdjustedMove.category === "status" || comboAdjustedMove.power === null) {
     return null;
   }
 
-  const attackStatKey: StatKey = effectiveMove.category === "special" ? "spa" : "atk";
+  const attackStatKey: StatKey = comboAdjustedMove.category === "special" ? "spa" : "atk";
   const attackStat = getStatValue(
     attacker.baseStats,
     input.ivs,
@@ -317,30 +520,30 @@ export function estimateMoveDecisivePower(
   const stagedAttackStat = applyStage(attackStat, input.attackerStages[attackStatKey]);
 
   const hasOriginalStab =
-    effectiveMove.type !== "Stellar" && attacker.types.includes(effectiveMove.type);
+    comboAdjustedMove.type !== "Stellar" && attacker.types.includes(comboAdjustedMove.type);
   void hasOriginalStab;
   void hasOriginalStab;
   void hasOriginalStab;
   const adaptabilityActive = hasAbility(options.attackerAbility, ["적응력", "adaptability"]);
   const stab = getStabMultiplier(
     attacker,
-    effectiveMove.type,
+    comboAdjustedMove.type,
     options.attackerTeraType,
     adaptabilityActive,
   );
 
   let weatherMultiplier = 1;
   if (options.weather === "sun") {
-    if (effectiveMove.type === "Fire") {
+    if (comboAdjustedMove.type === "Fire") {
       weatherMultiplier = 1.5;
-    } else if (effectiveMove.type === "Water") {
+    } else if (comboAdjustedMove.type === "Water") {
       weatherMultiplier = 0.5;
     }
   }
   if (options.weather === "rain") {
-    if (effectiveMove.type === "Water") {
+    if (comboAdjustedMove.type === "Water") {
       weatherMultiplier = 1.5;
-    } else if (effectiveMove.type === "Fire") {
+    } else if (comboAdjustedMove.type === "Fire") {
       weatherMultiplier = 0.5;
     }
   }
@@ -351,15 +554,15 @@ export function estimateMoveDecisivePower(
     itemMultiplier = 1.3;
   }
   if (
-    effectiveMove.category === "special" &&
+    comboAdjustedMove.category === "special" &&
     (normalizedItem.includes("choice specs") || normalizedItem.includes("구애안경"))
   ) {
     itemMultiplier = 1.5;
   }
 
-  const attackerAbility = getAttackerAbilityMultiplier(options.attackerAbility, effectiveMove);
+  const attackerAbility = getAttackerAbilityMultiplier(options.attackerAbility, comboAdjustedMove);
   if (
-    effectiveMove.category === "physical" &&
+    comboAdjustedMove.category === "physical" &&
     (normalizedItem.includes("choice band") || normalizedItem.includes("구애머리띠"))
   ) {
     itemMultiplier = 1.5;
@@ -368,10 +571,10 @@ export function estimateMoveDecisivePower(
   const totalMultiplier = stab * weatherMultiplier * itemMultiplier * attackerAbility.multiplier;
 
   return {
-    decisivePower: Math.round(stagedAttackStat * effectiveMove.power * totalMultiplier),
+    decisivePower: Math.round(stagedAttackStat * comboAdjustedMove.power * totalMultiplier),
     attackStat: stagedAttackStat,
-    movePower: effectiveMove.power,
-    summary: `공격 실수치 ${stagedAttackStat} x 기술 위력 ${move.power} x (STAB ${stab.toFixed(2)} * 날씨 ${weatherMultiplier.toFixed(2)} * 아이템 ${itemMultiplier.toFixed(2)} * 공격특성 ${attackerAbility.multiplier.toFixed(2)})`,
+    movePower: comboAdjustedMove.power,
+    summary: `공격 실수치 ${stagedAttackStat} x 기술 위력 ${comboAdjustedMove.power} x (STAB ${stab.toFixed(2)} * 날씨 ${weatherMultiplier.toFixed(2)} * 아이템 ${itemMultiplier.toFixed(2)} * 공격특성 ${attackerAbility.multiplier.toFixed(2)})`,
   };
 }
 
@@ -382,14 +585,16 @@ export function estimateDamagePercent(
   move: MoveEntry,
   options: DamageCalcOptions,
 ): DamageEstimate | null {
-  const effectiveMove = resolveEffectiveMove(attacker, input, move, options);
+  const teraResolvedMove = resolveEffectiveMove(attacker, input, move, options);
+  const moveResult = resolveMovePowerWithGimmicks(teraResolvedMove, input, options);
+  const comboAdjustedMove = moveResult.move;
 
-  if (effectiveMove.category === "status" || effectiveMove.power === null) {
+  if (comboAdjustedMove.category === "status" || comboAdjustedMove.power === null) {
     return null;
   }
 
-  const attackStatKey: StatKey = effectiveMove.category === "special" ? "spa" : "atk";
-  const defenseStatKey: StatKey = effectiveMove.category === "special" ? "spd" : "def";
+  const attackStatKey: StatKey = comboAdjustedMove.category === "special" ? "spa" : "atk";
+  const defenseStatKey: StatKey = comboAdjustedMove.category === "special" ? "spd" : "def";
 
   const attackStat = getStatValue(
     attacker.baseStats,
@@ -431,41 +636,41 @@ export function estimateDamagePercent(
   const defenderTypes = getEffectiveDefenderTypes(defender, options.defenderTeraType);
 
   const rawTypeEffectiveness = getMoveEffectiveness(
-    effectiveMove.type,
+    comboAdjustedMove.type,
     defenderTypes,
     options.defenderTeraType,
   );
 
   const hasOriginalStab =
-    effectiveMove.type !== "Stellar" && attacker.types.includes(effectiveMove.type);
+    comboAdjustedMove.type !== "Stellar" && attacker.types.includes(comboAdjustedMove.type);
   const adaptabilityActive = hasAbility(options.attackerAbility, ["적응력", "adaptability"]);
   const stab = getStabMultiplier(
     attacker,
-    effectiveMove.type,
+    comboAdjustedMove.type,
     options.attackerTeraType,
     adaptabilityActive,
   );
 
-  const attackerAbility = getAttackerAbilityMultiplier(options.attackerAbility, effectiveMove);
+  const attackerAbility = getAttackerAbilityMultiplier(options.attackerAbility, comboAdjustedMove);
   const defenderAbility = getDefenderAbilityMultiplier(
     options.defenderAbility,
-    effectiveMove,
+    comboAdjustedMove,
     rawTypeEffectiveness,
   );
   const typeEffectiveness = defenderAbility.overrideEffectiveness ?? rawTypeEffectiveness;
 
   let weatherMultiplier = 1;
   if (options.weather === "sun") {
-    if (effectiveMove.type === "Fire") {
+    if (comboAdjustedMove.type === "Fire") {
       weatherMultiplier = 1.5;
-    } else if (effectiveMove.type === "Water") {
+    } else if (comboAdjustedMove.type === "Water") {
       weatherMultiplier = 0.5;
     }
   }
   if (options.weather === "rain") {
-    if (effectiveMove.type === "Water") {
+    if (comboAdjustedMove.type === "Water") {
       weatherMultiplier = 1.5;
-    } else if (effectiveMove.type === "Fire") {
+    } else if (comboAdjustedMove.type === "Fire") {
       weatherMultiplier = 0.5;
     }
   }
@@ -484,13 +689,13 @@ export function estimateDamagePercent(
     itemMultiplier = 1.3;
   }
   if (
-    effectiveMove.category === "special" &&
+    comboAdjustedMove.category === "special" &&
     (normalizedItem.includes("choice specs") || normalizedItem.includes("구애안경"))
   ) {
     itemMultiplier = 1.5;
   }
   if (
-    effectiveMove.category === "physical" &&
+    comboAdjustedMove.category === "physical" &&
     (normalizedItem.includes("choice band") || normalizedItem.includes("구애머리띠"))
   ) {
     itemMultiplier = 1.5;
@@ -498,7 +703,7 @@ export function estimateDamagePercent(
   const baseDamage =
     Math.floor(
       Math.floor(
-        (((2 * 50) / 5 + 2) * effectiveMove.power * Math.max(1, stagedAttackStat)) /
+        (((2 * 50) / 5 + 2) * comboAdjustedMove.power * Math.max(1, stagedAttackStat)) /
           Math.max(1, effectiveDefense),
       ) / 50,
     ) + 2;
@@ -539,9 +744,11 @@ export function estimateDamagePercent(
     effectiveness: typeEffectiveness,
     effectivenessLabel,
     modifierSummary,
-    decisivePower: Math.round(stagedAttackStat * effectiveMove.power * totalMultiplier),
-    movePower: effectiveMove.power,
+    decisivePower: Math.round(stagedAttackStat * comboAdjustedMove.power * totalMultiplier),
+    movePower: comboAdjustedMove.power,
     koState,
     abilitySummary: `공격측 특성: ${attackerAbility.label} / 방어측 특성: ${defenderAbility.label}`,
+    gimmickSummary: moveResult.notes.length > 0 ? moveResult.notes.join(" / ") : "없음",
+    appliedGimmicks: moveResult.notes,
   };
 }
