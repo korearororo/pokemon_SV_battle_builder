@@ -27,6 +27,15 @@ type DamageEstimate = {
   appliedGimmicks: string[];
 };
 
+function isFinalGambitMove(moveName: string): boolean {
+  const normalized = moveName.trim().toLowerCase();
+  return (
+    normalized === "final gambit" ||
+    normalized === "final-gambit" ||
+    normalized === "죽기살기"
+  );
+}
+
 function hasAbility(abilityName: string | undefined, candidates: string[]): boolean {
   if (!abilityName) {
     return false;
@@ -588,6 +597,62 @@ export function estimateDamagePercent(
   const teraResolvedMove = resolveEffectiveMove(attacker, input, move, options);
   const moveResult = resolveMovePowerWithGimmicks(teraResolvedMove, input, options);
   const comboAdjustedMove = moveResult.move;
+
+  if (isFinalGambitMove(comboAdjustedMove.name)) {
+    const defenderTypes = getEffectiveDefenderTypes(defender, options.defenderTeraType);
+    const rawTypeEffectiveness = getMoveEffectiveness(
+      comboAdjustedMove.type,
+      defenderTypes,
+      options.defenderTeraType,
+    );
+    const defenderAbility = getDefenderAbilityMultiplier(
+      options.defenderAbility,
+      comboAdjustedMove,
+      rawTypeEffectiveness,
+    );
+    const typeEffectiveness = defenderAbility.overrideEffectiveness ?? rawTypeEffectiveness;
+    const effectivenessForFixedDamage = typeEffectiveness === 0 ? 0 : 1;
+
+    const neutralSpread: StatSpread = {
+      hp: 252,
+      atk: 0,
+      def: 4,
+      spa: 0,
+      spd: 4,
+      spe: 0,
+    };
+    const neutralIvs: StatSpread = {
+      hp: 31,
+      atk: 31,
+      def: 31,
+      spa: 31,
+      spd: 31,
+      spe: 31,
+    };
+    const defenderHp = getStatValue(defender.baseStats, neutralIvs, neutralSpread, "Hardy", "hp");
+    const attackerMaxHp = getStatValue(attacker.baseStats, input.ivs, input.evs, input.nature, "hp");
+    const attackerCurrentHpPercent = clampPercent(options.attackerCurrentHpPercent);
+    const fixedDamage = Math.floor(attackerMaxHp * (attackerCurrentHpPercent / 100));
+    const appliedDamage = Math.max(0, Math.floor(fixedDamage * effectivenessForFixedDamage));
+    const damagePercent = (appliedDamage / Math.max(1, defenderHp)) * 100;
+    const koState = damagePercent >= 100 ? "확정 1타" : "1타 불가";
+
+    return {
+      minPercent: clamp(Math.round(damagePercent * 10) / 10, 0, 999),
+      maxPercent: clamp(Math.round(damagePercent * 10) / 10, 0, 999),
+      attackStat: attackerMaxHp,
+      defenseStat: defenderHp,
+      effectiveness: typeEffectiveness,
+      effectivenessLabel: typeEffectiveness === 0 ? "무효" : "고정 피해",
+      modifierSummary: "죽기살기 고정 피해 (사용자 현재 HP 기준, 면역만 적용)",
+      decisivePower: appliedDamage,
+      movePower: appliedDamage,
+      koState,
+      abilitySummary: `공격측 특성: 없음 / 방어측 특성: ${defenderAbility.label}`,
+      gimmickSummary: `죽기살기: 현재 HP(${attackerCurrentHpPercent.toFixed(1)}%) 기반 고정 피해 ${appliedDamage}`,
+      appliedGimmicks: [`죽기살기 고정 피해 ${appliedDamage}`],
+    };
+  }
 
   if (comboAdjustedMove.category === "status" || comboAdjustedMove.power === null) {
     return null;

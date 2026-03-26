@@ -18,8 +18,11 @@ type AiBuild = {
   pokemonName?: string;
   role?: string;
   teraType?: string;
+  nature?: string;
   ability?: string;
   item?: string;
+  evs?: StatSpread;
+  ivs?: StatSpread;
   moves?: string[];
 };
 
@@ -77,8 +80,11 @@ function sanitizeBuilds(builds: unknown): AiBuild[] {
       pokemonName: typeof entry.pokemonName === "string" ? entry.pokemonName : "",
       role: typeof entry.role === "string" ? entry.role : "",
       teraType: typeof entry.teraType === "string" ? entry.teraType : "",
+      nature: typeof entry.nature === "string" ? entry.nature : "",
       ability: typeof entry.ability === "string" ? entry.ability : "",
       item: typeof entry.item === "string" ? entry.item : "",
+      evs: sanitizeSpread(entry.evs, DEFAULT_EVS, 252),
+      ivs: sanitizeSpread(entry.ivs, DEFAULT_IVS, 31),
       moves: Array.isArray(entry.moves)
         ? entry.moves.filter((move): move is string => typeof move === "string").slice(0, 6)
         : [],
@@ -96,7 +102,19 @@ function buildRegisteredContext(builds: AiBuild[]): string {
         ? `${entry.nickname}(${entry.pokemonName || "미지정"})`
         : entry.pokemonName || "미지정";
       const moves = entry.moves && entry.moves.length > 0 ? entry.moves.join(", ") : "기술 없음";
-      return `${index + 1}. ${displayName} | 역할:${entry.role || "미지정"} | 테라:${entry.teraType || "미지정"} | 특성:${entry.ability || "미지정"} | 도구:${entry.item || "미지정"} | 기술:${moves}`;
+      const evs = entry.evs ?? DEFAULT_EVS;
+      const ivs = entry.ivs ?? DEFAULT_IVS;
+      return [
+        `${index + 1}. ${displayName}`,
+        `역할:${entry.role || "미지정"}`,
+        `테라:${entry.teraType || "미지정"}`,
+        `성격:${entry.nature || "미지정"}`,
+        `특성:${entry.ability || "미지정"}`,
+        `도구:${entry.item || "미지정"}`,
+        `EV:${evs.hp}/${evs.atk}/${evs.def}/${evs.spa}/${evs.spd}/${evs.spe}`,
+        `IV:${ivs.hp}/${ivs.atk}/${ivs.def}/${ivs.spa}/${ivs.spd}/${ivs.spe}`,
+        `기술:${moves}`,
+      ].join(" | ");
     })
     .join("\n");
 }
@@ -292,6 +310,8 @@ async function callExternalLlm(args: {
             "- 내부 지식에 없는 세부 룰/메타는 일반 지식으로 보완 가능",
             "- 단, 포켓몬/기술/특성/도구 명칭은 가능한 내부 지식과 일치시킬 것",
             "- 샘플 추천 요청이면 suggestedBuilds에 1~3개를 넣어라",
+            "- 등록 개체에 성격/EV/IV/특성/도구가 이미 있으면 그 값을 사실로 사용하고, 같은 내용을 다시 질문하지 마라",
+            "- 등록 개체에서 실제로 비어 있는 항목만 보완 질문해도 된다",
             "",
             "출력 JSON 스키마:",
             "{",
@@ -345,6 +365,8 @@ async function callExternalLlm(args: {
 
 export async function POST(request: Request): Promise<Response> {
   try {
+    const requestUrl = new URL(request.url);
+    const debugRag = requestUrl.searchParams.get("debugRag") === "1";
     const payload = (await request.json()) as AiCoachRequest;
     const userMessage = (payload.message ?? "").trim();
     if (!userMessage) {
@@ -380,6 +402,14 @@ export async function POST(request: Request): Promise<Response> {
       suggestedBuilds: result.suggestedBuilds,
       mode: "internet-llm-rag",
       model: DEFAULT_MODEL,
+      ...(debugRag
+        ? {
+            debug: {
+              registeredContext,
+              ragContext,
+            },
+          }
+        : {}),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "unknown error";

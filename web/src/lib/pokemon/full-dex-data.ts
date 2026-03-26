@@ -18,6 +18,8 @@ const DATA_FILES = {
   pokemonSpecies: "pokemon_species.csv",
   pokemonSpeciesNames: "pokemon_species_names.csv",
   pokemon: "pokemon.csv",
+  pokemonForms: "pokemon_forms.csv",
+  pokemonFormNames: "pokemon_form_names.csv",
   pokemonStats: "pokemon_stats.csv",
   pokemonTypes: "pokemon_types.csv",
   types: "types.csv",
@@ -93,6 +95,30 @@ function titleCase(value: string): string {
 
 function applyMoveNameOverride(value: string): string {
   return MOVE_NAME_KO_OVERRIDES[normalize(value)] ?? value;
+}
+
+function mapFormTokenKo(token: string): string {
+  const key = token.trim().toLowerCase();
+  const mapped: Record<string, string> = {
+    alola: "알로라",
+    galar: "가라르",
+    hisui: "히스이",
+    paldea: "팔데아",
+    bloodmoon: "블러드문",
+    complete: "컴플리트",
+    therian: "영물",
+    incarnate: "화신",
+    origin: "오리진",
+    attack: "어택",
+    defense: "디펜스",
+    speed: "스피드",
+    ice: "아이스",
+    shadow: "백마",
+    rider: "라이더",
+    hero: "히어로",
+  };
+
+  return mapped[key] ?? titleCase(token);
 }
 
 function parseCsv(text: string): CsvRow[] {
@@ -223,6 +249,8 @@ export async function loadFullDexData(): Promise<FullDexData> {
       pokemonSpecies,
       pokemonSpeciesNames,
       pokemon,
+      pokemonForms,
+      pokemonFormNames,
       pokemonStats,
       pokemonTypes,
       types,
@@ -236,6 +264,8 @@ export async function loadFullDexData(): Promise<FullDexData> {
       fetchCsv(DATA_FILES.pokemonSpecies),
       fetchCsv(DATA_FILES.pokemonSpeciesNames),
       fetchCsv(DATA_FILES.pokemon),
+      fetchCsv(DATA_FILES.pokemonForms),
+      fetchCsv(DATA_FILES.pokemonFormNames),
       fetchCsv(DATA_FILES.pokemonStats),
       fetchCsv(DATA_FILES.pokemonTypes),
       fetchCsv(DATA_FILES.types),
@@ -257,6 +287,15 @@ export async function loadFullDexData(): Promise<FullDexData> {
     );
 
     const speciesNameKo = new Map<number, string>();
+    const speciesIdentifierById = new Map<number, string>();
+    for (const entry of pokemonSpecies) {
+      const speciesId = Number(entry.id);
+      if (!speciesIdSet.has(speciesId) || !entry.identifier) {
+        continue;
+      }
+      speciesIdentifierById.set(speciesId, entry.identifier);
+    }
+
     for (const entry of pokemonSpeciesNames) {
       const speciesId = Number(entry.pokemon_species_id);
       const languageId = Number(entry.local_language_id);
@@ -268,22 +307,53 @@ export async function loadFullDexData(): Promise<FullDexData> {
       }
     }
 
-    const defaultPokemonBySpecies = new Map<number, { pokemonId: number; identifier: string }>();
+    const pokemonMetaById = new Map<number, { speciesId: number; identifier: string; isDefault: boolean }>();
     for (const entry of pokemon) {
       const speciesId = Number(entry.species_id);
-      const isDefault = Number(entry.is_default) === 1;
       const pokemonId = Number(entry.id);
+      const isDefault = Number(entry.is_default) === 1;
 
-      if (!speciesIdSet.has(speciesId) || !isDefault || !Number.isFinite(pokemonId)) {
+      if (!speciesIdSet.has(speciesId) || !Number.isFinite(pokemonId) || !entry.identifier) {
         continue;
       }
 
-      if (!defaultPokemonBySpecies.has(speciesId) || pokemonId < (defaultPokemonBySpecies.get(speciesId)?.pokemonId ?? pokemonId + 1)) {
-        defaultPokemonBySpecies.set(speciesId, {
-          pokemonId,
-          identifier: entry.identifier,
-        });
+      pokemonMetaById.set(pokemonId, {
+        speciesId,
+        identifier: entry.identifier,
+        isDefault,
+      });
+    }
+
+    const formMetaByPokemonId = new Map<
+      number,
+      { formId: number; formIdentifier: string; isBattleOnly: boolean; isMega: boolean }
+    >();
+    for (const entry of pokemonForms) {
+      const pokemonId = Number(entry.pokemon_id);
+      const formId = Number(entry.id);
+      if (!Number.isFinite(pokemonId) || !Number.isFinite(formId)) {
+        continue;
       }
+
+      formMetaByPokemonId.set(pokemonId, {
+        formId,
+        formIdentifier: entry.form_identifier ?? "",
+        isBattleOnly: Number(entry.is_battle_only) === 1,
+        isMega: Number(entry.is_mega) === 1,
+      });
+    }
+
+    const formNameKoByFormId = new Map<number, { formName: string; pokemonName: string }>();
+    for (const entry of pokemonFormNames) {
+      const formId = Number(entry.pokemon_form_id);
+      const languageId = Number(entry.local_language_id);
+      if (!Number.isFinite(formId) || languageId !== koreanLanguageId) {
+        continue;
+      }
+      formNameKoByFormId.set(formId, {
+        formName: entry.form_name ?? "",
+        pokemonName: entry.pokemon_name ?? "",
+      });
     }
 
     const typeNameByTypeId = new Map<number, PokemonType>();
@@ -397,36 +467,93 @@ export async function loadFullDexData(): Promise<FullDexData> {
 
     const pokemonByName: Record<string, PokemonEntry> = {};
     const pokemonNamesKo: string[] = [];
-
-    for (const [speciesId, defaultPokemon] of defaultPokemonBySpecies.entries()) {
-      if (!speciesIdSet.has(speciesId)) {
-        continue;
+    const setAlias = (alias: string, entry: PokemonEntry, overwrite = false): void => {
+      const key = normalize(alias);
+      if (!key) {
+        return;
       }
-      const koName = speciesNameKo.get(speciesId) ?? titleCase(defaultPokemon.identifier);
-      const stats = pokemonStatsByPokemonId.get(defaultPokemon.pokemonId);
+      if (!overwrite && pokemonByName[key]) {
+        return;
+      }
+      pokemonByName[key] = entry;
+    };
+
+    const pokemonCandidates = Array.from(pokemonMetaById.entries())
+      .filter(([pokemonId, meta]) => {
+        if (!speciesIdSet.has(meta.speciesId)) {
+          return false;
+        }
+        const formMeta = formMetaByPokemonId.get(pokemonId);
+        if (!formMeta) {
+          return true;
+        }
+        return !formMeta.isBattleOnly && !formMeta.isMega;
+      })
+      .sort((a, b) => {
+        const leftDefault = a[1].isDefault ? 0 : 1;
+        const rightDefault = b[1].isDefault ? 0 : 1;
+        if (a[1].speciesId !== b[1].speciesId) {
+          return a[1].speciesId - b[1].speciesId;
+        }
+        if (leftDefault !== rightDefault) {
+          return leftDefault - rightDefault;
+        }
+        return a[0] - b[0];
+      });
+
+    for (const [pokemonId, meta] of pokemonCandidates) {
+      const speciesId = meta.speciesId;
+      const speciesKo = speciesNameKo.get(speciesId) ?? titleCase(meta.identifier);
+      const speciesIdentifier = speciesIdentifierById.get(speciesId) ?? "";
+      const stats = pokemonStatsByPokemonId.get(pokemonId);
       if (!stats) {
         continue;
       }
-      const types = (pokemonTypesByPokemonId.get(defaultPokemon.pokemonId) ?? ["Normal"]).filter(
-        Boolean,
-      ) as PokemonType[];
-      const abilities = pokemonAbilitiesByPokemonId.get(defaultPokemon.pokemonId) ?? [];
+
+      const types = (pokemonTypesByPokemonId.get(pokemonId) ?? ["Normal"]).filter(Boolean) as PokemonType[];
+      const abilities = pokemonAbilitiesByPokemonId.get(pokemonId) ?? [];
+      const formMeta = formMetaByPokemonId.get(pokemonId);
+      const formNameKo = formMeta ? formNameKoByFormId.get(formMeta.formId) : undefined;
+
+      const formTokenRaw = meta.identifier.startsWith(`${speciesIdentifier}-`)
+        ? meta.identifier.slice(speciesIdentifier.length + 1)
+        : formMeta?.formIdentifier || "";
+      const mappedFormToken = formTokenRaw
+        ? formTokenRaw
+            .split("-")
+            .map((token) => mapFormTokenKo(token))
+            .join(" ")
+        : "";
+
+      const displayName = meta.isDefault
+        ? speciesKo
+        : formNameKo?.pokemonName?.trim() ||
+          (formNameKo?.formName?.trim() ? `${speciesKo} (${formNameKo.formName.trim()})` : "") ||
+          (mappedFormToken ? `${speciesKo} (${mappedFormToken})` : titleCase(meta.identifier));
 
       const entry: PokemonEntry = {
-        name: koName,
-        pokemonId: defaultPokemon.pokemonId,
+        name: displayName,
+        pokemonId,
         speciesId,
-        identifier: defaultPokemon.identifier,
+        identifier: meta.identifier,
         types,
         abilities,
         baseStats: stats,
         speedTierTag: stats.spe >= 120 ? "Fast" : stats.spe >= 80 ? "Mid" : "Slow",
       };
 
-      pokemonNamesKo.push(koName);
-      pokemonByName[normalize(koName)] = entry;
-      pokemonByName[normalize(titleCase(defaultPokemon.identifier))] = entry;
-      pokemonByName[normalize(defaultPokemon.identifier)] = entry;
+      pokemonNamesKo.push(displayName);
+      setAlias(displayName, entry);
+      setAlias(meta.identifier, entry, true);
+      setAlias(titleCase(meta.identifier), entry, true);
+
+      if (meta.isDefault) {
+        setAlias(speciesKo, entry, true);
+        if (speciesIdentifier) {
+          setAlias(speciesIdentifier, entry, true);
+          setAlias(titleCase(speciesIdentifier), entry, true);
+        }
+      }
     }
 
     const moveNameKoById = new Map<number, string>();

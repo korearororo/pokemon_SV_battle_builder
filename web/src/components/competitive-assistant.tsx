@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import Image from "next/image";
 
 import { NATURES, ROLE_LABELS, STAT_KEYS, STAT_LABELS, TYPE_LABELS_KO } from "@/lib/pokemon/constants";
@@ -21,7 +21,7 @@ import type {
   TeraType,
 } from "@/lib/pokemon/types";
 
-type TabMode = "builder" | "matchup" | "ai";
+type TabMode = "builder" | "matchup" | "ai" | "dev";
 
 type AiMessage = {
   id: string;
@@ -62,6 +62,35 @@ type AiCoachReplyPayload = {
   reply: string;
   suggestedBuilds: AiSuggestedBuild[];
 };
+
+type AiCoachDebugPayload = AiCoachReplyPayload & {
+  debug?: {
+    registeredContext?: string;
+    ragContext?: string;
+  };
+};
+
+type AiRequestBuild = {
+  nickname: string;
+  pokemonName: string;
+  role: PokemonRole;
+  teraType: string;
+  nature: string;
+  ability: string;
+  item: string;
+  evs: StatSpread;
+  ivs: StatSpread;
+  moves: string[];
+};
+
+type DevAiDebugResult = {
+  reply: string;
+  registeredContext: string;
+  ragContext: string;
+  rawJson: string;
+};
+
+type AiProgressStage = "prepare" | "context" | "request" | "analyze" | "compose";
 
 const BUILDS_STORAGE_KEY = "sv-battle:registered-builds";
 const NEW_BUILD_OPTION = "__new__";
@@ -218,7 +247,8 @@ function buildSnapshotText(builds: RegisteredEntity[]): string {
     .map((entry, index) => {
       const moveText = entry.moves.length > 0 ? entry.moves.join(", ") : "기술 미등록";
       const teraText = entry.teraType || "미지정";
-      return `${index + 1}. ${entry.nickname || entry.pokemonName} | 역할 ${ROLE_LABELS[entry.role]} | 테라 ${teraText} | 기술 ${moveText}`;
+      const evText = `${entry.evs.hp}/${entry.evs.atk}/${entry.evs.def}/${entry.evs.spa}/${entry.evs.spd}/${entry.evs.spe}`;
+      return `${index + 1}. ${entry.nickname || entry.pokemonName} | 역할 ${ROLE_LABELS[entry.role]} | 테라 ${teraText} | 성격 ${entry.nature || "미지정"} | 특성 ${entry.ability || "미지정"} | 도구 ${entry.item || "미지정"} | EV ${evText} | 기술 ${moveText}`;
     })
     .join("\n");
 }
@@ -329,6 +359,21 @@ function sanitizeAiSuggestedBuilds(payload: unknown): AiSuggestedBuild[] {
     .filter((entry) => entry.pokemonName.length > 0);
 }
 
+function toAiRequestBuilds(builds: RegisteredEntity[]): AiRequestBuild[] {
+  return builds.map((entry) => ({
+    nickname: entry.nickname,
+    pokemonName: entry.pokemonName,
+    role: entry.role,
+    teraType: entry.teraType,
+    nature: entry.nature,
+    ability: entry.ability,
+    item: entry.item,
+    evs: entry.evs,
+    ivs: entry.ivs,
+    moves: entry.moves,
+  }));
+}
+
 async function fetchAiCoachReply(input: string, builds: RegisteredEntity[]): Promise<AiCoachReplyPayload | null> {
   try {
     const response = await fetch("/api/ai-coach", {
@@ -336,15 +381,7 @@ async function fetchAiCoachReply(input: string, builds: RegisteredEntity[]): Pro
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         message: input,
-        builds: builds.map((entry) => ({
-          nickname: entry.nickname,
-          pokemonName: entry.pokemonName,
-          role: entry.role,
-          teraType: entry.teraType,
-          ability: entry.ability,
-          item: entry.item,
-          moves: entry.moves,
-        })),
+        builds: toAiRequestBuilds(builds),
       }),
     });
 
@@ -360,6 +397,36 @@ async function fetchAiCoachReply(input: string, builds: RegisteredEntity[]): Pro
     return {
       reply: payload.reply.trim(),
       suggestedBuilds: sanitizeAiSuggestedBuilds(payload.suggestedBuilds),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchAiCoachDebug(input: string, builds: RegisteredEntity[]): Promise<DevAiDebugResult | null> {
+  try {
+    const response = await fetch("/api/ai-coach?debugRag=1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: input,
+        builds: toAiRequestBuilds(builds),
+      }),
+    });
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = (await response.json()) as AiCoachDebugPayload;
+    if (typeof payload.reply !== "string" || !payload.reply.trim()) {
+      return null;
+    }
+
+    return {
+      reply: payload.reply.trim(),
+      registeredContext: typeof payload.debug?.registeredContext === "string" ? payload.debug.registeredContext : "",
+      ragContext: typeof payload.debug?.ragContext === "string" ? payload.debug.ragContext : "",
+      rawJson: JSON.stringify(payload, null, 2),
     };
   } catch {
     return null;
@@ -397,6 +464,25 @@ function isDefensiveMove(move: MoveEntry | null): boolean {
   ]);
 
   return defensiveMoves.has(normalized);
+}
+
+function isFinalGambitMove(move: MoveEntry | null): boolean {
+  if (!move) {
+    return false;
+  }
+  const normalized = normalize(move.name);
+  return normalized === "final gambit" || normalized === "final-gambit" || normalized === "죽기살기";
+}
+
+function getTeraCardStyle(teraType: TeraType | "", enabled: boolean): CSSProperties | undefined {
+  if (!enabled || !teraType) {
+    return undefined;
+  }
+  const meta = TYPE_ICON_META[teraType];
+  return {
+    "--tera-bg": meta.background,
+    "--tera-border": meta.border,
+  } as CSSProperties;
 }
 
 function gimmickTags(summary: string): string[] {
@@ -606,6 +692,10 @@ export function CompetitiveAssistant() {
   const [notice, setNotice] = useState<string>("");
   const [aiInput, setAiInput] = useState<string>("");
   const [aiStatus, setAiStatus] = useState<"idle" | "connecting" | "generating">("idle");
+  const [devAiInput, setDevAiInput] = useState<string>("");
+  const [devAiLoading, setDevAiLoading] = useState<boolean>(false);
+  const [devAiResult, setDevAiResult] = useState<DevAiDebugResult | null>(null);
+  const [aiProgressStage, setAiProgressStage] = useState<AiProgressStage>("prepare");
   const [aiMessages, setAiMessages] = useState<AiMessage[]>([
     {
       id: "ai-welcome",
@@ -1078,7 +1168,7 @@ export function CompetitiveAssistant() {
         return { summary: `${actorName}의 ${displayMoveName(move.name)}: 방어 자세를 취합니다.`, expectedDamageToTarget: 0, guaranteedKo: false, adjustedPower: null as number | null, gimmickSummary: "없음" };
       }
 
-      if (move.category === "status" || move.power === null) {
+      if ((move.category === "status" || move.power === null) && !isFinalGambitMove(move)) {
         return { summary: `${actorName}의 ${displayMoveName(move.name)}: 변화기라 직접 데미지를 주지 않습니다.`, expectedDamageToTarget: 0, guaranteedKo: false, adjustedPower: null as number | null, gimmickSummary: "없음" };
       }
 
@@ -1397,6 +1487,59 @@ export function CompetitiveAssistant() {
     }
   }, [builderSelectedId, registeredBuilds]);
 
+  const aiProgressSteps = useMemo(() => {
+    const steps = [
+      { key: "prepare", label: "질문 정리" },
+      { key: "context", label: "등록 개체/도감 컨텍스트 구성" },
+      { key: "request", label: "AI 서버 요청" },
+      { key: "analyze", label: "응답 검증/분석" },
+      { key: "compose", label: "최종 답변 정리" },
+    ] as const;
+
+    if (aiStatus === "idle") {
+      return [] as Array<{ key: string; label: string; state: "done" | "active" | "pending" }>;
+    }
+
+    const stageIndexByKey: Record<AiProgressStage, number> = {
+      prepare: 0,
+      context: 1,
+      request: 2,
+      analyze: 3,
+      compose: 4,
+    };
+    let activeIndex = stageIndexByKey[aiProgressStage];
+    if (aiStatus === "connecting") {
+      activeIndex = Math.min(activeIndex, 2);
+    } else if (aiStatus === "generating") {
+      activeIndex = Math.max(activeIndex, 3);
+    }
+
+    return steps.map((step, index) => ({
+      key: step.key,
+      label: step.label,
+      state: index < activeIndex ? ("done" as const) : index === activeIndex ? ("active" as const) : ("pending" as const),
+    }));
+  }, [aiProgressStage, aiStatus]);
+
+  const aiStatusLabel = useMemo(() => {
+    if (aiStatus === "idle") {
+      return "";
+    }
+    if (aiProgressStage === "prepare") {
+      return "요청 준비 중...";
+    }
+    if (aiProgressStage === "context") {
+      return "등록 개체/도감 정보 정리 중...";
+    }
+    if (aiProgressStage === "request") {
+      return "AI 서버 연결 및 요청 전송 중...";
+    }
+    if (aiProgressStage === "analyze") {
+      return "AI 응답 분석 중...";
+    }
+    return "답변 정리 중...";
+  }, [aiProgressStage, aiStatus]);
+
   const sendAiMessage = async () => {
     if (aiStatus !== "idle") {
       return;
@@ -1415,9 +1558,30 @@ export function CompetitiveAssistant() {
     setAiMessages((prev) => [...prev, userMessage]);
     setAiInput("");
     setAiStatus("connecting");
+    setAiProgressStage("prepare");
+    let disposed = false;
+    const progressTimers: number[] = [];
+    const setStagedTimer = (delay: number, stage: AiProgressStage) => {
+      const timer = window.setTimeout(() => {
+        if (!disposed) {
+          setAiProgressStage(stage);
+        }
+      }, delay);
+      progressTimers.push(timer);
+    };
+    setStagedTimer(180, "context");
+    setStagedTimer(650, "request");
+
     const stageTimer = setTimeout(() => {
-      setAiStatus((prev) => (prev === "connecting" ? "generating" : prev));
+      setAiStatus((prev) => {
+        if (prev !== "connecting") {
+          return prev;
+        }
+        setAiProgressStage("analyze");
+        return "generating";
+      });
     }, 1200);
+    setStagedTimer(1800, "compose");
 
     try {
       const aiReply = await fetchAiCoachReply(trimmed, registeredBuilds);
@@ -1429,8 +1593,36 @@ export function CompetitiveAssistant() {
       };
       setAiMessages((prev) => [...prev, assistantMessage]);
     } finally {
+      disposed = true;
       clearTimeout(stageTimer);
+      progressTimers.forEach((timer) => clearTimeout(timer));
       setAiStatus("idle");
+      setAiProgressStage("prepare");
+    }
+  };
+
+  const sendDebugAiMessage = async () => {
+    if (devAiLoading) {
+      return;
+    }
+
+    const trimmed = devAiInput.trim();
+    if (!trimmed) {
+      setNotice("개발자 탭 질문을 입력해 주세요.");
+      return;
+    }
+
+    setDevAiLoading(true);
+    try {
+      const debugResult = await fetchAiCoachDebug(trimmed, registeredBuilds);
+      if (!debugResult) {
+        setNotice("RAG 디버그 응답을 가져오지 못했습니다.");
+        return;
+      }
+      setDevAiResult(debugResult);
+      setNotice("RAG 디버그 컨텍스트를 불러왔습니다.");
+    } finally {
+      setDevAiLoading(false);
     }
   };
 
@@ -1465,6 +1657,13 @@ export function CompetitiveAssistant() {
           className={`px-4 py-2 text-sm font-semibold transition ${tab === "ai" ? "pk-tab-active" : "pk-tab-idle"}`}
         >
           AI 코치
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab("dev")}
+          className={`px-4 py-2 text-sm font-semibold transition ${tab === "dev" ? "pk-tab-active" : "pk-tab-idle"}`}
+        >
+          개발자
         </button>
       </div>
 
@@ -1845,8 +2044,29 @@ export function CompetitiveAssistant() {
           </div>
 
           <div className="grid gap-4 md:grid-cols-2">
-            <div className="pk-card p-3">
-              <h3 className="mb-2 text-sm font-semibold text-slate-900">왼쪽 포켓몬</h3>
+            <div
+              className={`pk-card p-3 ${leftTeraEnabled && leftRegisteredTeraType ? "pk-card-tera" : ""}`}
+              style={getTeraCardStyle(leftRegisteredTeraType, leftTeraEnabled)}
+            >
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold text-slate-900">왼쪽 포켓몬</h3>
+                <button
+                  type="button"
+                  className={`pk-tera-icon-btn ${leftTeraEnabled ? "is-on" : "is-off"} ${!leftRegisteredTeraType ? "cursor-not-allowed opacity-50" : ""}`}
+                  onClick={() => setLeftTeraEnabled((prev) => !prev)}
+                  disabled={!leftRegisteredTeraType}
+                  title={leftRegisteredTeraType ? `왼쪽 테라스탈 ${leftTeraEnabled ? "ON" : "OFF"}` : "왼쪽 테라 타입 미지정"}
+                >
+                  <span className="pk-tera-gem" aria-hidden="true">T</span>
+                  <span className="text-[11px] font-semibold">
+                    {leftRegisteredTeraType ? (TYPE_LABELS_KO[leftRegisteredTeraType] ?? leftRegisteredTeraType) : "미지정"}
+                  </span>
+                  <span className="rounded-full bg-white/80 px-1.5 py-0.5 text-[10px] font-black text-slate-700">
+                    {leftTeraEnabled ? "ON" : "OFF"}
+                  </span>
+                </button>
+              </div>
+              {leftTeraEnabled && leftRegisteredTeraType ? <div className="pk-tera-prism" aria-hidden="true" /> : null}
               {leftBuild && resolvedLeftPokemon ? (
                 <div className="flex items-center gap-3">
                   <Image
@@ -1854,7 +2074,7 @@ export function CompetitiveAssistant() {
                     alt={`${resolvedLeftPokemon.name} 일러스트`}
                     width={96}
                     height={96}
-                    className="h-24 w-24 rounded-lg bg-white p-1 shadow"
+                    className={`h-24 w-24 rounded-lg bg-white p-1 shadow ${leftTeraEnabled && leftRegisteredTeraType ? "pk-tera-subject" : ""}`}
                   />
                   <p className="text-sm text-slate-700">{leftBuild.nickname || leftBuild.pokemonName}</p>
                 </div>
@@ -1863,8 +2083,29 @@ export function CompetitiveAssistant() {
               )}
             </div>
 
-            <div className="pk-card p-3">
-              <h3 className="mb-2 text-sm font-semibold text-slate-900">오른쪽 포켓몬</h3>
+            <div
+              className={`pk-card p-3 ${rightTeraEnabled && rightRegisteredTeraType ? "pk-card-tera" : ""}`}
+              style={getTeraCardStyle(rightRegisteredTeraType, rightTeraEnabled)}
+            >
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold text-slate-900">오른쪽 포켓몬</h3>
+                <button
+                  type="button"
+                  className={`pk-tera-icon-btn ${rightTeraEnabled ? "is-on" : "is-off"} ${!rightRegisteredTeraType ? "cursor-not-allowed opacity-50" : ""}`}
+                  onClick={() => setRightTeraEnabled((prev) => !prev)}
+                  disabled={!rightRegisteredTeraType}
+                  title={rightRegisteredTeraType ? `오른쪽 테라스탈 ${rightTeraEnabled ? "ON" : "OFF"}` : "오른쪽 테라 타입 미지정"}
+                >
+                  <span className="pk-tera-gem" aria-hidden="true">T</span>
+                  <span className="text-[11px] font-semibold">
+                    {rightRegisteredTeraType ? (TYPE_LABELS_KO[rightRegisteredTeraType] ?? rightRegisteredTeraType) : "미지정"}
+                  </span>
+                  <span className="rounded-full bg-white/80 px-1.5 py-0.5 text-[10px] font-black text-slate-700">
+                    {rightTeraEnabled ? "ON" : "OFF"}
+                  </span>
+                </button>
+              </div>
+              {rightTeraEnabled && rightRegisteredTeraType ? <div className="pk-tera-prism" aria-hidden="true" /> : null}
               {rightBuild && resolvedRightPokemon ? (
                 <div className="flex items-center gap-3">
                   <Image
@@ -1872,46 +2113,13 @@ export function CompetitiveAssistant() {
                     alt={`${resolvedRightPokemon.name} 일러스트`}
                     width={96}
                     height={96}
-                    className="h-24 w-24 rounded-lg bg-white p-1 shadow"
+                    className={`h-24 w-24 rounded-lg bg-white p-1 shadow ${rightTeraEnabled && rightRegisteredTeraType ? "pk-tera-subject" : ""}`}
                   />
                   <p className="text-sm text-slate-700">{rightBuild.nickname || rightBuild.pokemonName}</p>
                 </div>
               ) : (
                 <p className="text-sm text-slate-600">오른쪽 개체를 선택하면 일러스트가 표시됩니다.</p>
               )}
-            </div>
-          </div>
-
-          <div className="grid gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700 md:grid-cols-2">
-            <div className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-white px-3 py-2">
-              <span>
-                왼쪽 테라스탈
-                {" "}
-                ({leftRegisteredTeraType ? TYPE_LABELS_KO[leftRegisteredTeraType] ?? leftRegisteredTeraType : "미지정"})
-              </span>
-              <button
-                type="button"
-                className={`rounded-md px-3 py-1 font-semibold ${leftTeraEnabled ? "bg-emerald-500 text-white" : "bg-slate-300 text-slate-700"} ${!leftRegisteredTeraType ? "cursor-not-allowed opacity-50" : ""}`}
-                onClick={() => setLeftTeraEnabled((prev) => !prev)}
-                disabled={!leftRegisteredTeraType}
-              >
-                {leftTeraEnabled ? "ON" : "OFF"}
-              </button>
-            </div>
-            <div className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-white px-3 py-2">
-              <span>
-                오른쪽 테라스탈
-                {" "}
-                ({rightRegisteredTeraType ? TYPE_LABELS_KO[rightRegisteredTeraType] ?? rightRegisteredTeraType : "미지정"})
-              </span>
-              <button
-                type="button"
-                className={`rounded-md px-3 py-1 font-semibold ${rightTeraEnabled ? "bg-emerald-500 text-white" : "bg-slate-300 text-slate-700"} ${!rightRegisteredTeraType ? "cursor-not-allowed opacity-50" : ""}`}
-                onClick={() => setRightTeraEnabled((prev) => !prev)}
-                disabled={!rightRegisteredTeraType}
-              >
-                {rightTeraEnabled ? "ON" : "OFF"}
-              </button>
             </div>
           </div>
 
@@ -2005,7 +2213,7 @@ export function CompetitiveAssistant() {
             ) : null}
           </div>
         </div>
-      ) : (
+      ) : tab === "ai" ? (
         <div className="pk-grid-bg space-y-4 rounded-2xl p-2 md:p-3">
           <h2 className="pk-section-title text-lg text-slate-900">AI 코치 (로컬 모드)</h2>
           <p className="text-xs text-slate-600">
@@ -2035,6 +2243,9 @@ export function CompetitiveAssistant() {
                           역할 {ROLE_LABELS[build.role]} | 테라 {build.teraType || "미지정"} | 기술{" "}
                           {build.moves.length > 0 ? build.moves.join(" / ") : "없음"}
                         </p>
+                        <p className="text-[11px] text-slate-600">
+                          성격 {build.nature || "미지정"} | EV {build.evs.hp}/{build.evs.atk}/{build.evs.def}/{build.evs.spa}/{build.evs.spd}/{build.evs.spe}
+                        </p>
                         <button
                           type="button"
                           className="mt-2 rounded-md bg-emerald-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-emerald-500"
@@ -2051,9 +2262,29 @@ export function CompetitiveAssistant() {
             {aiStatus !== "idle" ? (
               <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
                 <p className="mb-1 text-[11px] font-semibold opacity-80">AI 코치</p>
-                <p className="animate-pulse">
-                  {aiStatus === "connecting" ? "AI 연결 중..." : "AI 답변 작성 중..."}
-                </p>
+                <div className="flex items-center gap-2">
+                  <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-amber-500 border-t-transparent" aria-hidden="true" />
+                  <p className="font-semibold">
+                    {aiStatusLabel}
+                  </p>
+                </div>
+                <div className="mt-2 space-y-1 text-[11px] text-amber-900/90">
+                  {aiProgressSteps.map((step) => (
+                    <div key={step.key} className="flex items-center gap-2">
+                      <span
+                        className={`inline-block h-2.5 w-2.5 rounded-full ${
+                          step.state === "done"
+                            ? "bg-emerald-500"
+                            : step.state === "active"
+                              ? "bg-amber-500"
+                              : "bg-slate-300"
+                        }`}
+                        aria-hidden="true"
+                      />
+                      <span>{step.label}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             ) : null}
           </div>
@@ -2075,11 +2306,75 @@ export function CompetitiveAssistant() {
             <button
               type="button"
               onClick={sendAiMessage}
-              className="pk-primary-btn px-4 py-2 text-sm"
+              className="pk-primary-btn inline-flex items-center gap-2 px-4 py-2 text-sm"
               disabled={aiStatus !== "idle"}
             >
-              {aiStatus === "idle" ? "전송" : "대기"}
+              {aiStatus === "idle" ? "전송" : "처리 중..."}
+              {aiStatus !== "idle" ? (
+                <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/80 border-t-transparent" aria-hidden="true" />
+              ) : null}
             </button>
+          </div>
+        </div>
+      ) : (
+        <div className="pk-grid-bg space-y-4 rounded-2xl p-2 md:p-3">
+          <h2 className="pk-section-title text-lg text-slate-900">개발자 탭 (RAG 디버그)</h2>
+          <p className="text-xs text-slate-600">
+            AI 요청 시 실제로 전달되는 등록 개체 컨텍스트와 RAG 컨텍스트를 확인합니다.
+          </p>
+
+          <div className="flex gap-2">
+            <input
+              value={devAiInput}
+              onChange={(event) => setDevAiInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  sendDebugAiMessage();
+                }
+              }}
+              className="pk-control flex-1"
+              placeholder="예: 코라이돈 샘플 추천해줘"
+              disabled={devAiLoading}
+            />
+            <button
+              type="button"
+              onClick={sendDebugAiMessage}
+              className="pk-primary-btn inline-flex items-center gap-2 px-4 py-2 text-sm"
+              disabled={devAiLoading}
+            >
+              {devAiLoading ? "조회 중..." : "RAG 보기"}
+              {devAiLoading ? (
+                <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/80 border-t-transparent" aria-hidden="true" />
+              ) : null}
+            </button>
+          </div>
+
+          <div className="grid gap-3">
+            <div className="pk-card p-3">
+              <p className="mb-2 text-xs font-semibold text-slate-700">AI 답변</p>
+              <pre className="max-h-52 overflow-auto whitespace-pre-wrap rounded-md bg-slate-50 p-2 text-xs text-slate-800">
+                {devAiResult?.reply || "아직 조회하지 않았습니다."}
+              </pre>
+            </div>
+            <div className="pk-card p-3">
+              <p className="mb-2 text-xs font-semibold text-slate-700">등록 개체 컨텍스트</p>
+              <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded-md bg-slate-50 p-2 text-xs text-slate-800">
+                {devAiResult?.registeredContext || "debug.registeredContext 없음"}
+              </pre>
+            </div>
+            <div className="pk-card p-3">
+              <p className="mb-2 text-xs font-semibold text-slate-700">RAG 컨텍스트</p>
+              <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded-md bg-slate-50 p-2 text-xs text-slate-800">
+                {devAiResult?.ragContext || "debug.ragContext 없음"}
+              </pre>
+            </div>
+            <div className="pk-card p-3">
+              <p className="mb-2 text-xs font-semibold text-slate-700">원본 응답 JSON</p>
+              <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-slate-50 p-2 text-xs text-slate-800">
+                {devAiResult?.rawJson || "아직 조회하지 않았습니다."}
+              </pre>
+            </div>
           </div>
         </div>
       )}
